@@ -1,0 +1,6 @@
+{
+  "name": "Daily Standup Log",
+  "description": "A clean, beginner-friendly async daily standup bulletin board where teams post three-question status updates, surface blockers, and see live teammate updates in real time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
