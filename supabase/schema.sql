@@ -1,5 +1,5 @@
 -- =============================================================================
--- DAILY STANDUP LOG - SUPABASE SQL SCHEMA, RLS POLICIES & REALTIME SETUP
+-- TEAM COLLABORATION - SUPABASE SQL SCHEMA, RLS POLICIES & REALTIME SETUP
 -- =============================================================================
 -- Run this script in your Supabase SQL Editor to configure the complete database.
 
@@ -77,8 +77,20 @@ CREATE TABLE IF NOT EXISTS public.standup_updates (
   blockers TEXT NOT NULL DEFAULT 'None.',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- Each member can submit one update per team per day and edit it later
+  -- Each member has one daily update per team and can edit it later
   UNIQUE (team_id, user_id, update_date)
+);
+
+-- -----------------------------------------------------------------------------
+-- 5. CHAT MESSAGES TABLE
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.chat_messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- Keep updated_at current on row edits
@@ -95,14 +107,20 @@ CREATE TRIGGER trg_standup_updates_updated_at
   BEFORE UPDATE ON public.standup_updates
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_chat_messages_updated_at ON public.chat_messages;
+CREATE TRIGGER trg_chat_messages_updated_at
+  BEFORE UPDATE ON public.chat_messages
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
 -- =============================================================================
--- 5. ROW LEVEL SECURITY (RLS) POLICIES
+-- 6. ROW LEVEL SECURITY (RLS) POLICIES
 -- =============================================================================
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.standup_updates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
 
 -- Helper function to check if the current user belongs to a team
 CREATE OR REPLACE FUNCTION public.is_team_member(check_team_id UUID)
@@ -115,12 +133,12 @@ RETURNS BOOLEAN AS $$
 $$ LANGUAGE sql SECURITY DEFINER STABLE;
 
 -- Profiles Policies
-CREATE POLICY "Authenticated users can view teammate profiles"
+CREATE POLICY "Users can read profiles needed by their teams"
   ON public.profiles FOR SELECT
   TO authenticated
   USING (true);
 
-CREATE POLICY "Users can update their own profile"
+CREATE POLICY "Users can edit their own profile"
   ON public.profiles FOR UPDATE
   TO authenticated
   USING (auth.uid() = id)
@@ -132,7 +150,7 @@ CREATE POLICY "Users can insert their own profile"
   WITH CHECK (auth.uid() = id);
 
 -- Teams Policies
-CREATE POLICY "Users can read teams they belong to"
+CREATE POLICY "Members can read teams they belong to"
   ON public.teams FOR SELECT
   TO authenticated
   USING (public.is_team_member(id) OR owner_id = auth.uid());
@@ -142,27 +160,33 @@ CREATE POLICY "Authenticated users can create teams"
   TO authenticated
   WITH CHECK (owner_id = auth.uid());
 
-CREATE POLICY "Team owners can update their team"
+CREATE POLICY "Owners can update their team"
   ON public.teams FOR UPDATE
   TO authenticated
   USING (owner_id = auth.uid())
   WITH CHECK (owner_id = auth.uid());
 
-CREATE POLICY "Team owners can delete their team"
+CREATE POLICY "Owners can delete their team"
   ON public.teams FOR DELETE
   TO authenticated
   USING (owner_id = auth.uid());
 
 -- Team Members Policies
-CREATE POLICY "Members can view memberships in their teams"
+CREATE POLICY "Users can see members of teams they belong to"
   ON public.team_members FOR SELECT
   TO authenticated
   USING (public.is_team_member(team_id));
 
-CREATE POLICY "Users can join a team for themselves"
+CREATE POLICY "Users can join or owners can add members"
   ON public.team_members FOR INSERT
   TO authenticated
-  WITH CHECK (user_id = auth.uid());
+  WITH CHECK (
+    user_id = auth.uid() OR
+    EXISTS (
+      SELECT 1 FROM public.teams
+      WHERE id = team_members.team_id AND owner_id = auth.uid()
+    )
+  );
 
 CREATE POLICY "Users can leave or owners can remove members"
   ON public.team_members FOR DELETE
@@ -176,12 +200,12 @@ CREATE POLICY "Users can leave or owners can remove members"
   );
 
 -- Standup Updates Policies
-CREATE POLICY "Members can read standup updates in their teams"
+CREATE POLICY "Read updates from teams they belong to"
   ON public.standup_updates FOR SELECT
   TO authenticated
   USING (public.is_team_member(team_id));
 
-CREATE POLICY "Members can create standup updates only for themselves in their teams"
+CREATE POLICY "Create their own update in teams they belong to"
   ON public.standup_updates FOR INSERT
   TO authenticated
   WITH CHECK (
@@ -189,20 +213,48 @@ CREATE POLICY "Members can create standup updates only for themselves in their t
     public.is_team_member(team_id)
   );
 
-CREATE POLICY "Members can update only their own standup updates"
+CREATE POLICY "Update their own update"
   ON public.standup_updates FOR UPDATE
   TO authenticated
   USING (user_id = auth.uid() AND public.is_team_member(team_id))
   WITH CHECK (user_id = auth.uid() AND public.is_team_member(team_id));
 
-CREATE POLICY "Members can delete only their own standup updates"
+CREATE POLICY "Delete their own update"
   ON public.standup_updates FOR DELETE
   TO authenticated
   USING (user_id = auth.uid());
 
+-- Chat Messages Policies
+CREATE POLICY "Read messages from teams they belong to"
+  ON public.chat_messages FOR SELECT
+  TO authenticated
+  USING (public.is_team_member(team_id));
+
+CREATE POLICY "Send messages to teams they belong to"
+  ON public.chat_messages FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    user_id = auth.uid() AND
+    public.is_team_member(team_id)
+  );
+
+CREATE POLICY "Edit their own messages"
+  ON public.chat_messages FOR UPDATE
+  TO authenticated
+  USING (user_id = auth.uid() AND public.is_team_member(team_id))
+  WITH CHECK (user_id = auth.uid() AND public.is_team_member(team_id));
+
+CREATE POLICY "Delete their own messages"
+  ON public.chat_messages FOR DELETE
+  TO authenticated
+  USING (user_id = auth.uid());
+
 -- =============================================================================
--- 6. SUPABASE REALTIME CONFIGURATION
+-- 7. SUPABASE REALTIME CONFIGURATION
 -- =============================================================================
--- Enable Realtime PostgreSQL CDC (INSERT, UPDATE, DELETE) for standup_updates
+-- Enable Realtime PostgreSQL CDC (INSERT, UPDATE, DELETE) for standup_updates and chat_messages
 ALTER TABLE public.standup_updates REPLICA IDENTITY FULL;
+ALTER TABLE public.chat_messages REPLICA IDENTITY FULL;
+
 ALTER PUBLICATION supabase_realtime ADD TABLE public.standup_updates;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.chat_messages;

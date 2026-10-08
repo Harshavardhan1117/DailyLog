@@ -52,12 +52,23 @@ CREATE TABLE IF NOT EXISTS public.standup_updates (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (team_id, user_id, update_date)
+);
+
+-- 5. CHAT MESSAGES TABLE
+CREATE TABLE IF NOT EXISTS public.chat_messages (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );`;
 
 const SUPABASE_RLS_SQL = `ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.standup_updates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
 
 -- Helper: Check if authenticated user belongs to a team
 CREATE OR REPLACE FUNCTION public.is_team_member(check_team_id UUID)
@@ -68,34 +79,51 @@ RETURNS BOOLEAN AS $$
   );
 $$ LANGUAGE sql SECURITY DEFINER STABLE;
 
--- Read team data only if member
+-- Profiles: Read teammate profiles, edit own profile
+CREATE POLICY "Read profiles" ON public.profiles FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Edit own profile" ON public.profiles FOR UPDATE TO authenticated
+  USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+-- Teams: Read if member, owners can update
 CREATE POLICY "Read team if member" ON public.teams
   FOR SELECT TO authenticated USING (public.is_team_member(id) OR owner_id = auth.uid());
-
--- Team owners can manage their team
 CREATE POLICY "Owners manage team" ON public.teams
   FOR ALL TO authenticated USING (owner_id = auth.uid()) WITH CHECK (owner_id = auth.uid());
 
--- Read updates only if team member
+-- Team Members: View members in same team, owners can add/remove
+CREATE POLICY "View team members" ON public.team_members
+  FOR SELECT TO authenticated USING (public.is_team_member(team_id));
+CREATE POLICY "Manage team members" ON public.team_members
+  FOR DELETE TO authenticated USING (
+    user_id = auth.uid() OR
+    EXISTS (SELECT 1 FROM public.teams WHERE id = team_members.team_id AND owner_id = auth.uid())
+  );
+
+-- Standup Updates: Read team updates, create/update/delete own update
 CREATE POLICY "Read team updates" ON public.standup_updates
   FOR SELECT TO authenticated USING (public.is_team_member(team_id));
-
--- Create update only for self and in a team user belongs to
 CREATE POLICY "Insert own standup update" ON public.standup_updates
-  FOR INSERT TO authenticated
-  WITH CHECK (user_id = auth.uid() AND public.is_team_member(team_id));
-
--- Update/Delete only own standup update
+  FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid() AND public.is_team_member(team_id));
 CREATE POLICY "Update own standup update" ON public.standup_updates
-  FOR UPDATE TO authenticated
-  USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
-
+  FOR UPDATE TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
 CREATE POLICY "Delete own standup update" ON public.standup_updates
   FOR DELETE TO authenticated USING (user_id = auth.uid());
 
--- Enable Supabase Realtime for standup_updates
+-- Chat Messages: Read team messages, send/edit/delete own messages
+CREATE POLICY "Read team chat" ON public.chat_messages
+  FOR SELECT TO authenticated USING (public.is_team_member(team_id));
+CREATE POLICY "Send team chat" ON public.chat_messages
+  FOR INSERT TO authenticated WITH CHECK (user_id = auth.uid() AND public.is_team_member(team_id));
+CREATE POLICY "Edit own chat message" ON public.chat_messages
+  FOR UPDATE TO authenticated USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+CREATE POLICY "Delete own chat message" ON public.chat_messages
+  FOR DELETE TO authenticated USING (user_id = auth.uid());
+
+-- Enable Supabase Realtime for standup_updates and chat_messages
 ALTER TABLE public.standup_updates REPLICA IDENTITY FULL;
-ALTER PUBLICATION supabase_realtime ADD TABLE public.standup_updates;`;
+ALTER TABLE public.chat_messages REPLICA IDENTITY FULL;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.standup_updates;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.chat_messages;`;
 
 export function SqlSetupModal({ isOpen, onClose }: SqlSetupModalProps) {
   const [tab, setTab] = useState<'schema' | 'rls' | 'setup'>('schema');
@@ -115,10 +143,10 @@ export function SqlSetupModal({ isOpen, onClose }: SqlSetupModalProps) {
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h2 className="text-base font-bold text-slate-900">
-              Supabase SQL Schema, RLS Policies & Realtime Setup
+              Team Collaboration — Supabase SQL Schema, RLS & Realtime Setup
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Complete deliverables included in <code className="font-mono">supabase/schema.sql</code> and <code className="font-mono">README.md</code>
+              Complete deliverables in <code className="font-mono">supabase/schema.sql</code> and <code className="font-mono">README.md</code>
             </p>
           </div>
           <button
@@ -141,7 +169,7 @@ export function SqlSetupModal({ isOpen, onClose }: SqlSetupModalProps) {
                 : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            1. SQL Schema
+            1. SQL Schema (5 Tables)
           </button>
           <button
             type="button"
@@ -172,7 +200,7 @@ export function SqlSetupModal({ isOpen, onClose }: SqlSetupModalProps) {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-medium text-slate-600">
-                  Tables: profiles, teams, team_members, standup_updates (with UNIQUE constraint)
+                  Tables: profiles, teams, team_members, standup_updates, chat_messages
                 </span>
                 <button
                   type="button"
@@ -227,13 +255,13 @@ VITE_SUPABASE_ANON_KEY=your-anon-public-key`}
                 </h3>
                 <ol className="list-decimal list-inside space-y-1.5 text-slate-600">
                   <li>
-                    Sign in using Google on the <strong>/login</strong> page.
+                    Sign up or log in on the <strong>/login</strong> page.
                   </li>
                   <li>
-                    On <strong>/teams</strong>, click <strong>&ldquo;Load Demo Team &amp; Sample Updates&rdquo;</strong> to automatically seed a sample engineering squad with Harsh, Rahul, Priya, and Maya.
+                    On <strong>/teams</strong>, click <strong>&ldquo;Load Demo Team &amp; Sample Data&rdquo;</strong> to seed a sample team with Harsh, Rahul, Ananya, and Kiran (including standup updates and chat messages).
                   </li>
                   <li>
-                    Open the team board and click <strong>&ldquo;Simulate Teammate Live Post&rdquo;</strong> to watch a realtime update appear on your board without refreshing the page.
+                    Open the team workspace to switch seamlessly between <strong>[ Standup ]</strong>, <strong>[ Chat ]</strong>, <strong>[ History ]</strong>, and <strong>[ Members ]</strong>.
                   </li>
                 </ol>
               </div>

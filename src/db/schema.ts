@@ -2,10 +2,10 @@ import { relations } from 'drizzle-orm';
 import { pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-core';
 
 /**
- * Profiles table linked to authenticated users (Firebase Auth UID / auth.users).
+ * Profiles table linked to authenticated users (auth.users).
  */
 export const profiles = pgTable('profiles', {
-  id: text('id').primaryKey(), // Matches auth UID
+  id: text('id').primaryKey(),
   email: text('email').notNull(),
   fullName: text('full_name').notNull(),
   passwordHash: text('password_hash').default('').notNull(),
@@ -16,7 +16,7 @@ export const profiles = pgTable('profiles', {
 });
 
 /**
- * Teams table representing a standup group.
+ * Teams table representing a team workspace.
  */
 export const teams = pgTable('teams', {
   id: text('id').primaryKey(),
@@ -80,11 +80,29 @@ export const standupUpdates = pgTable(
   ]
 );
 
+/**
+ * Realtime team group chat messages table.
+ * Every message belongs to one team and one user.
+ */
+export const chatMessages = pgTable('chat_messages', {
+  id: text('id').primaryKey(),
+  teamId: text('team_id')
+    .references(() => teams.id, { onDelete: 'cascade' })
+    .notNull(),
+  userId: text('user_id')
+    .references(() => profiles.id, { onDelete: 'cascade' })
+    .notNull(),
+  message: text('message').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 // Relations
 export const profilesRelations = relations(profiles, ({ many }) => ({
   ownedTeams: many(teams),
   memberships: many(teamMembers),
   standupUpdates: many(standupUpdates),
+  chatMessages: many(chatMessages),
 }));
 
 export const teamsRelations = relations(teams, ({ one, many }) => ({
@@ -94,6 +112,7 @@ export const teamsRelations = relations(teams, ({ one, many }) => ({
   }),
   members: many(teamMembers),
   updates: many(standupUpdates),
+  messages: many(chatMessages),
 }));
 
 export const teamMembersRelations = relations(teamMembers, ({ one }) => ({
@@ -114,6 +133,17 @@ export const standupUpdatesRelations = relations(standupUpdates, ({ one }) => ({
   }),
   author: one(profiles, {
     fields: [standupUpdates.userId],
+    references: [profiles.id],
+  }),
+}));
+
+export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
+  team: one(teams, {
+    fields: [chatMessages.teamId],
+    references: [teams.id],
+  }),
+  author: one(profiles, {
+    fields: [chatMessages.userId],
     references: [profiles.id],
   }),
 }));

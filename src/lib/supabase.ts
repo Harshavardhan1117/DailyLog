@@ -6,12 +6,9 @@ import { auth } from './firebase.ts';
  * SUPABASE CLIENT, REALTIME & VERCEL-READY DATA ADAPTER (src/lib/supabase.ts)
  * ============================================================================
  * Supports 3 automatic runtime modes so the app works everywhere:
- * 1. Standalone Supabase Mode (on Vercel or locally when VITE_SUPABASE_URL &
- *    VITE_SUPABASE_ANON_KEY are configured in Environment Variables).
- * 2. Cloud SQL Backend Mode (when running with the Express `/api/*` server).
- * 3. Static Deployment Mode (when deployed to Vercel static hosting before
- *    external Supabase keys are configured — uses persistent browser storage
- *    + BroadcastChannel Realtime so authentication and boards never break).
+ * 1. Standalone Supabase Mode (when VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY are set)
+ * 2. Cloud SQL Backend Mode (Express + PostgreSQL + Realtime SSE)
+ * 3. Vercel Static Fallback Mode (Browser storage + BroadcastChannel Realtime)
  */
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
@@ -22,51 +19,55 @@ export const supabase =
     ? createClient(supabaseUrl, supabaseAnonKey)
     : null;
 
-// Session token & local user tracking
 let activeSessionToken: string | null = null;
-const SESSION_TOKEN_KEY = 'dsl_session_token';
-const LOCAL_DB_KEY = 'dsl_vercel_database_v1';
-const BROADCAST_CHANNEL_NAME = 'dsl_realtime_standup_updates';
+const SESSION_TOKEN_KEY = 'tc_session_token';
+const LOCAL_DB_KEY = 'tc_vercel_database_v2';
+const BROADCAST_CHANNEL_NAME = 'tc_realtime_workspace_events';
 
-const localRealtimeListeners = new Map<
-  string,
-  Set<
-    (payload: {
-      eventType: 'INSERT' | 'UPDATE' | 'DELETE';
-      new: any;
-      old: any;
-    }) => void
-  >
->();
+type RealtimeCallback = (payload: {
+  table?: 'standup_updates' | 'chat_messages';
+  eventType: 'INSERT' | 'UPDATE' | 'DELETE';
+  new: any;
+  old: any;
+}) => void;
+
+const localStandupListeners = new Map<string, Set<RealtimeCallback>>();
+const localChatListeners = new Map<string, Set<RealtimeCallback>>();
 
 let broadcastChannel: BroadcastChannel | null = null;
 try {
   if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
     broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
     broadcastChannel.onmessage = (event) => {
-      const { teamId, payload } = event.data || {};
-      if (teamId && payload) {
-        const listeners = localRealtimeListeners.get(teamId);
-        listeners?.forEach((cb) => cb(payload));
+      const { teamId, table, payload } = event.data || {};
+      if (!teamId || !payload) return;
+      if (table === 'chat_messages') {
+        localChatListeners.get(teamId)?.forEach((cb) => cb(payload));
+      } else {
+        localStandupListeners.get(teamId)?.forEach((cb) => cb(payload));
       }
     };
   }
 } catch {
-  // Ignore if BroadcastChannel is not supported
+  // Ignore if BroadcastChannel is unavailable
 }
 
 function emitLocalRealtime(
   teamId: string,
+  table: 'standup_updates' | 'chat_messages',
   payload: {
     eventType: 'INSERT' | 'UPDATE' | 'DELETE';
     new: any;
     old: any;
   }
 ) {
-  const listeners = localRealtimeListeners.get(teamId);
-  listeners?.forEach((cb) => cb(payload));
+  if (table === 'chat_messages') {
+    localChatListeners.get(teamId)?.forEach((cb) => cb(payload));
+  } else {
+    localStandupListeners.get(teamId)?.forEach((cb) => cb(payload));
+  }
   try {
-    broadcastChannel?.postMessage({ teamId, payload });
+    broadcastChannel?.postMessage({ teamId, table, payload });
   } catch {
     // Ignore broadcast errors
   }
@@ -178,13 +179,28 @@ interface LocalStore {
     createdAt: string;
     updatedAt: string;
   }>;
+  chatMessages: Array<{
+    id: string;
+    teamId: string;
+    userId: string;
+    message: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
 }
 
 function loadLocalStore(): LocalStore {
   try {
     const raw = localStorage.getItem(LOCAL_DB_KEY);
     if (raw) {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      return {
+        profiles: parsed.profiles || {},
+        teams: parsed.teams || {},
+        teamMembers: parsed.teamMembers || [],
+        standupUpdates: parsed.standupUpdates || [],
+        chatMessages: parsed.chatMessages || [],
+      };
     }
   } catch {
     // Ignore parse error
@@ -194,6 +210,7 @@ function loadLocalStore(): LocalStore {
     teams: {},
     teamMembers: [],
     standupUpdates: [],
+    chatMessages: [],
   };
 }
 
@@ -244,15 +261,10 @@ function getCurrentLocalUid(): string {
   throw new Error('Unauthorized: Please log in to continue.');
 }
 
-/**
- * Checks if our backend Express server (`/api/*`) is reachable and returning JSON.
- * On Vercel static deployments without a Node backend, `/api/*` returns 404 or HTML.
- */
 async function tryBackendJson(
   url: string,
   options?: RequestInit
 ): Promise<{ available: boolean; ok: boolean; status: number; data: any }> {
-  // If user configured external Supabase, prefer Supabase directly over Express
   if (supabase) {
     return { available: false, ok: false, status: 0, data: null };
   }
@@ -272,10 +284,6 @@ async function tryBackendJson(
   }
 }
 
-// ============================================================================
-// Unified API Request Handler (Works on Express, Supabase, AND Vercel Static)
-// ============================================================================
-
 export async function apiRequest(
   path: string,
   options: {
@@ -294,11 +302,11 @@ export async function apiRequest(
     try {
       headers = await getAuthHeaders();
     } catch {
-      // Continue if using Supabase session
+      // Continue if using Supabase or fallback
     }
   }
 
-  // 1. Try Express / Cloud SQL backend if not using external Supabase
+  // 1. Try Express / Cloud SQL backend
   const backendRes = await tryBackendJson(path, {
     method,
     headers,
@@ -312,19 +320,15 @@ export async function apiRequest(
     return backendRes.data;
   }
 
-  // 2. If external Supabase is configured via VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY
+  // 2. External Supabase when VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY are set
   if (supabase) {
     return handleSupabaseRequest(path, method, options.body);
   }
 
-  // 3. Vercel Static Fallback Mode (Persistent Local DB + BroadcastChannel Realtime)
+  // 3. Vercel Static Fallback Mode
   return handleLocalVercelRequest(path, method, options.body);
 }
 
-/**
- * Executes requests directly against Supabase Auth & Supabase PostgreSQL when
- * VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are configured on Vercel.
- */
 async function handleSupabaseRequest(
   path: string,
   method: string,
@@ -343,7 +347,8 @@ async function handleSupabaseRequest(
     });
     if (error) throw new Error(error.message);
     const userId = data.user?.id;
-    if (!userId) throw new Error('Sign up succeeded. Please check your email to confirm.');
+    if (!userId)
+      throw new Error('Sign up succeeded. Please check your email to confirm.');
 
     const profileObj = {
       id: userId,
@@ -396,67 +401,9 @@ async function handleSupabaseRequest(
     };
   }
 
-  // For other routes when using Supabase, get current Supabase user
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    // Fallback to local store if using quick session
-    return handleLocalVercelRequest(path, method, body);
-  }
-
-  if (path === '/api/profile' && method === 'GET') {
-    const { data: prof } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user.id)
-      .single();
-    return {
-      profile: {
-        id: user.id,
-        email: user.email || '',
-        fullName:
-          prof?.full_name ||
-          user.user_metadata?.full_name ||
-          user.email?.split('@')[0] ||
-          'Team Member',
-        jobTitle: prof?.job_title || 'Team Member',
-        avatarUrl: prof?.avatar_url || '',
-      },
-    };
-  }
-
-  if (path === '/api/profile' && method === 'PUT') {
-    const { fullName, jobTitle } = body;
-    const { data: updated, error } = await supabase
-      .from('profiles')
-      .upsert({
-        id: user.id,
-        email: user.email || '',
-        full_name: fullName.trim(),
-        job_title: (jobTitle || '').trim(),
-      })
-      .select()
-      .single();
-    if (error) throw new Error(error.message);
-    return {
-      profile: {
-        id: updated.id,
-        email: updated.email,
-        fullName: updated.full_name,
-        jobTitle: updated.job_title || '',
-        avatarUrl: updated.avatar_url || '',
-      },
-    };
-  }
-
-  // Fallback to local store if tables aren't created yet in user's Supabase
   return handleLocalVercelRequest(path, method, body);
 }
 
-/**
- * Handles all API routes locally in the browser when deployed to Vercel static hosting.
- */
 function handleLocalVercelRequest(
   path: string,
   method: string,
@@ -531,7 +478,7 @@ function handleLocalVercelRequest(
 
   // 3. POST /api/auth/quick-session
   if (path === '/api/auth/quick-session' && method === 'POST') {
-    const email = (body?.email || 'alex.morgan@standuplog.dev')
+    const email = (body?.email || 'alex.morgan@teamcollab.dev')
       .trim()
       .toLowerCase();
     const fullName = (body?.fullName || 'Alex Morgan').trim();
@@ -559,12 +506,12 @@ function handleLocalVercelRequest(
     };
   }
 
-  // Authenticated routes below
+  // Authenticated routes
   const uid = getCurrentLocalUid();
   if (!store.profiles[uid]) {
     store.profiles[uid] = {
       id: uid,
-      email: auth.currentUser?.email || 'member@standuplog.dev',
+      email: auth.currentUser?.email || 'member@teamcollab.dev',
       fullName:
         auth.currentUser?.displayName ||
         auth.currentUser?.email?.split('@')[0] ||
@@ -588,6 +535,10 @@ function handleLocalVercelRequest(
       ...store.profiles[uid],
       fullName: (body?.fullName || '').trim() || store.profiles[uid].fullName,
       jobTitle: (body?.jobTitle || '').trim(),
+      avatarUrl:
+        typeof body?.avatarUrl === 'string'
+          ? body.avatarUrl.trim()
+          : store.profiles[uid].avatarUrl,
     };
     saveLocalStore(store);
     const { password: _, ...cleanProfile } = store.profiles[uid];
@@ -595,7 +546,12 @@ function handleLocalVercelRequest(
   }
 
   // 6. GET /api/teams
-  if (path.startsWith('/api/teams') && method === 'GET' && !path.includes('/board')) {
+  if (
+    path.startsWith('/api/teams') &&
+    method === 'GET' &&
+    !path.includes('/board') &&
+    !path.includes('/chat')
+  ) {
     const urlObj = new URL(path, 'http://localhost');
     const todayDate = urlObj.searchParams.get('today') || getLocalTodayDate();
 
@@ -628,7 +584,7 @@ function handleLocalVercelRequest(
     return { teams: resultTeams };
   }
 
-  // 7. POST /api/teams (Create Team)
+  // 7. POST /api/teams
   if (path === '/api/teams' && method === 'POST') {
     const name = (body?.name || '').trim();
     const description = (body?.description || '').trim();
@@ -681,13 +637,41 @@ function handleLocalVercelRequest(
     return { team: foundTeam };
   }
 
+  // 8b. DELETE /api/teams/:teamId/leave
+  const leaveMatch = path.match(/^\/api\/teams\/([^/?]+)\/leave$/);
+  if (leaveMatch && method === 'DELETE') {
+    const teamId = leaveMatch[1];
+    store.teamMembers = store.teamMembers.filter(
+      (m) => !(m.teamId === teamId && m.userId === uid)
+    );
+    saveLocalStore(store);
+    return { success: true };
+  }
+
+  // 8c. DELETE /api/teams/:teamId/members/:memberId
+  const removeMemberMatch = path.match(
+    /^\/api\/teams\/([^/?]+)\/members\/([^/?]+)$/
+  );
+  if (removeMemberMatch && method === 'DELETE') {
+    const [, teamId, memberId] = removeMemberMatch;
+    const team = store.teams[teamId];
+    if (!team || team.ownerId !== uid) {
+      throw new Error('Only the team owner can remove members.');
+    }
+    store.teamMembers = store.teamMembers.filter(
+      (m) => !(m.teamId === teamId && m.userId === memberId)
+    );
+    saveLocalStore(store);
+    return { removedUserId: memberId };
+  }
+
   // 9. POST /api/teams/seed-demo
   if (path === '/api/teams/seed-demo' && method === 'POST') {
     const todayDate = body?.today || getLocalTodayDate();
     const demoTeammates = [
       {
         id: 'demo-user-harsh',
-        email: 'harsh@standuplog.dev',
+        email: 'harsh@teamcollab.dev',
         fullName: 'Harsh',
         jobTitle: 'Backend Engineer',
         avatarUrl: '',
@@ -695,24 +679,24 @@ function handleLocalVercelRequest(
       },
       {
         id: 'demo-user-rahul',
-        email: 'rahul@standuplog.dev',
-        fullName: 'Rahul Sharma',
+        email: 'rahul@teamcollab.dev',
+        fullName: 'Rahul',
         jobTitle: 'Full-Stack Developer',
         avatarUrl: '',
         createdAt: new Date().toISOString(),
       },
       {
-        id: 'demo-user-priya',
-        email: 'priya@standuplog.dev',
-        fullName: 'Priya Patel',
+        id: 'demo-user-ananya',
+        email: 'ananya@teamcollab.dev',
+        fullName: 'Ananya',
         jobTitle: 'Product Designer',
         avatarUrl: '',
         createdAt: new Date().toISOString(),
       },
       {
-        id: 'demo-user-maya',
-        email: 'maya@standuplog.dev',
-        fullName: 'Maya Lin',
+        id: 'demo-user-kiran',
+        email: 'kiran@teamcollab.dev',
+        fullName: 'Kiran',
         jobTitle: 'QA & Release Lead',
         avatarUrl: '',
         createdAt: new Date().toISOString(),
@@ -726,9 +710,9 @@ function handleLocalVercelRequest(
     const teamId = `team_demo_${Date.now()}`;
     const createdTeam = {
       id: teamId,
-      name: 'Core Product Engineering',
+      name: 'Core Product Team',
       description:
-        'Daily async standup board for the Core Platform & API engineering squad.',
+        'Shared workspace for daily async standups and realtime group chat.',
       inviteCode: generateShortInviteCode('CORE'),
       ownerId: uid,
       createdAt: new Date().toISOString(),
@@ -762,37 +746,33 @@ function handleLocalVercelRequest(
       {
         userId: 'demo-user-harsh',
         updateDate: todayDate,
-        workedOn:
-          'Completed the PostgreSQL DBMS schema and configured Row Level Security policies.',
-        nextPlan:
-          'Build the main team bulletin board view and hook up Realtime subscriptions.',
+        workedOn: 'Completed the DBMS schema.',
+        nextPlan: 'Build the dashboard.',
         blockers: 'None.',
         offsetMinutes: -45,
       },
       {
         userId: 'demo-user-rahul',
         updateDate: todayDate,
-        workedOn:
-          'Fixed authentication session persistence and added protected route guards.',
-        nextPlan: 'End-to-end testing of invite codes and team switching.',
-        blockers: 'Waiting for staging OAuth callback URL approval from DevOps.',
+        workedOn: 'Fixed authentication.',
+        nextPlan: 'Testing.',
+        blockers: 'Waiting for API access.',
         offsetMinutes: -20,
       },
       {
-        userId: 'demo-user-priya',
+        userId: 'demo-user-ananya',
         updateDate: todayDate,
-        workedOn:
-          'Finalized responsive card layout and blocker warning indicators for mobile screens.',
-        nextPlan: 'Review history date filter interactions with engineering.',
+        workedOn: 'Finalized the responsive workspace layout and chat view.',
+        nextPlan: 'Prepare sprint demo slides.',
         blockers: 'None.',
-        offsetMinutes: -8,
+        offsetMinutes: -10,
       },
       {
         userId: 'demo-user-harsh',
         updateDate: yesterdayDate,
         workedOn:
-          'Drafted initial ERD for profiles, teams, team_members, and standup_updates.',
-        nextPlan: 'Write SQL migrations and test unique constraints.',
+          'Drafted initial ERD for profiles, teams, standups, and chat.',
+        nextPlan: 'Write SQL migrations and RLS policies.',
         blockers: 'None.',
         offsetMinutes: -1440,
       },
@@ -808,6 +788,36 @@ function handleLocalVercelRequest(
         workedOn: item.workedOn,
         nextPlan: item.nextPlan,
         blockers: item.blockers,
+        createdAt: ts,
+        updatedAt: ts,
+      });
+    }
+
+    const sampleChats = [
+      {
+        userId: 'demo-user-rahul',
+        message: 'Hey, has everyone finished the presentation?',
+        offsetMinutes: -18,
+      },
+      {
+        userId: 'demo-user-harsh',
+        message: "Almost. I'm fixing the dashboard now.",
+        offsetMinutes: -16,
+      },
+      {
+        userId: 'demo-user-ananya',
+        message: "I'll finish the slides in 20 minutes.",
+        offsetMinutes: -14,
+      },
+    ];
+
+    for (const chat of sampleChats) {
+      const ts = new Date(Date.now() + chat.offsetMinutes * 60000).toISOString();
+      store.chatMessages.push({
+        id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        teamId,
+        userId: chat.userId,
+        message: chat.message,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -832,7 +842,7 @@ function handleLocalVercelRequest(
     );
     if (!membership) {
       throw new Error(
-        'Access denied. You must be a member of this team to view its bulletin board.'
+        'Access denied. You must be a member of this team to view its workspace.'
       );
     }
 
@@ -844,7 +854,7 @@ function handleLocalVercelRequest(
         joinedAt: m.joinedAt,
         user: store.profiles[m.userId] || {
           id: m.userId,
-          email: 'member@standuplog.dev',
+          email: 'member@teamcollab.dev',
           fullName: 'Team Member',
           jobTitle: '',
           avatarUrl: '',
@@ -926,7 +936,7 @@ function handleLocalVercelRequest(
     }
 
     saveLocalStore(store);
-    emitLocalRealtime(teamId, {
+    emitLocalRealtime(teamId, 'standup_updates', {
       eventType,
       new: savedRecord,
       old: null,
@@ -939,13 +949,13 @@ function handleLocalVercelRequest(
   if (simMatch && method === 'POST') {
     const teamId = simMatch[1];
     const todayDate = body?.today || getLocalTodayDate();
-    const mateId = 'demo-user-maya';
+    const mateId = 'demo-user-kiran';
 
     if (!store.profiles[mateId]) {
       store.profiles[mateId] = {
         id: mateId,
-        email: 'maya@standuplog.dev',
-        fullName: 'Maya Lin',
+        email: 'kiran@teamcollab.dev',
+        fullName: 'Kiran',
         jobTitle: 'QA & Release Lead',
         avatarUrl: '',
         createdAt: new Date().toISOString(),
@@ -958,7 +968,7 @@ function handleLocalVercelRequest(
       )
     ) {
       store.teamMembers.push({
-        id: `tm_maya_${Date.now()}`,
+        id: `tm_kiran_${Date.now()}`,
         teamId,
         userId: mateId,
         role: 'member',
@@ -970,16 +980,15 @@ function handleLocalVercelRequest(
     const samples = [
       {
         workedOn:
-          'Verified realtime PostgreSQL event broadcasting across concurrent browser tabs.',
+          'Verified realtime PostgreSQL events for standups and group chat.',
         nextPlan: 'Run regression suite on the History date filter view.',
         blockers: 'None.',
       },
       {
         workedOn:
-          'Audited Row Level Security policies for standup_updates and team_members.',
+          'Audited Row Level Security policies for chat_messages and standup_updates.',
         nextPlan: 'Sign off on production release checklist.',
-        blockers:
-          'Blocked on final confirmation for mobile Safari viewport test.',
+        blockers: 'Waiting for staging environment credentials.',
       },
     ];
     const pick = samples[Math.floor(Math.random() * samples.length)];
@@ -1007,7 +1016,7 @@ function handleLocalVercelRequest(
       };
     } else {
       const created = {
-        id: `upd_maya_${Date.now()}`,
+        id: `upd_kiran_${Date.now()}`,
         teamId,
         userId: mateId,
         updateDate: todayDate,
@@ -1023,7 +1032,7 @@ function handleLocalVercelRequest(
     }
 
     saveLocalStore(store);
-    emitLocalRealtime(teamId, {
+    emitLocalRealtime(teamId, 'standup_updates', {
       eventType,
       new: savedRecord,
       old: null,
@@ -1043,7 +1052,105 @@ function handleLocalVercelRequest(
     }
     store.standupUpdates.splice(foundIdx, 1);
     saveLocalStore(store);
-    emitLocalRealtime(target.teamId, {
+    emitLocalRealtime(target.teamId, 'standup_updates', {
+      eventType: 'DELETE',
+      new: null,
+      old: { id: target.id, teamId: target.teamId, userId: target.userId },
+    });
+    return { deletedId: target.id };
+  }
+
+  // 14. GET /api/teams/:teamId/chat
+  const chatGetMatch = path.match(/^\/api\/teams\/([^/?]+)\/chat$/);
+  if (chatGetMatch && method === 'GET') {
+    const teamId = chatGetMatch[1];
+    const messages = store.chatMessages
+      .filter((m) => m.teamId === teamId)
+      .map((m) => ({
+        ...m,
+        author: store.profiles[m.userId] || {
+          id: m.userId,
+          email: 'member@teamcollab.dev',
+          fullName: 'Team Member',
+          jobTitle: '',
+          avatarUrl: '',
+        },
+      }))
+      .sort(
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      );
+    return { messages };
+  }
+
+  // 15. POST /api/teams/:teamId/chat
+  if (chatGetMatch && method === 'POST') {
+    const teamId = chatGetMatch[1];
+    const text = (body?.message || '').trim();
+    if (!text) throw new Error('Message cannot be empty.');
+    const now = new Date().toISOString();
+    const created = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      teamId,
+      userId: uid,
+      message: text,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.chatMessages.push(created);
+    saveLocalStore(store);
+    const enriched = {
+      ...created,
+      author: store.profiles[uid],
+    };
+    emitLocalRealtime(teamId, 'chat_messages', {
+      eventType: 'INSERT',
+      new: enriched,
+      old: null,
+    });
+    return { message: enriched };
+  }
+
+  // 16. PUT /api/chat/:messageId
+  const chatItemMatch = path.match(/^\/api\/chat\/([^/?]+)$/);
+  if (chatItemMatch && method === 'PUT') {
+    const messageId = chatItemMatch[1];
+    const idx = store.chatMessages.findIndex((m) => m.id === messageId);
+    if (idx === -1) throw new Error('Message not found.');
+    if (store.chatMessages[idx].userId !== uid) {
+      throw new Error('You can only edit your own messages.');
+    }
+    const now = new Date().toISOString();
+    store.chatMessages[idx] = {
+      ...store.chatMessages[idx],
+      message: (body?.message || '').trim(),
+      updatedAt: now,
+    };
+    saveLocalStore(store);
+    const enriched = {
+      ...store.chatMessages[idx],
+      author: store.profiles[uid],
+    };
+    emitLocalRealtime(enriched.teamId, 'chat_messages', {
+      eventType: 'UPDATE',
+      new: enriched,
+      old: null,
+    });
+    return { message: enriched };
+  }
+
+  // 17. DELETE /api/chat/:messageId
+  if (chatItemMatch && method === 'DELETE') {
+    const messageId = chatItemMatch[1];
+    const idx = store.chatMessages.findIndex((m) => m.id === messageId);
+    if (idx === -1) throw new Error('Message not found.');
+    const target = store.chatMessages[idx];
+    if (target.userId !== uid) {
+      throw new Error('You can only delete your own messages.');
+    }
+    store.chatMessages.splice(idx, 1);
+    saveLocalStore(store);
+    emitLocalRealtime(target.teamId, 'chat_messages', {
       eventType: 'DELETE',
       new: null,
       old: { id: target.id, teamId: target.teamId, userId: target.userId },
@@ -1055,25 +1162,19 @@ function handleLocalVercelRequest(
 }
 
 /**
- * Subscribes to Realtime changes on `standup_updates` filtered by `team_id`.
- * Works with Supabase Realtime, Express SSE, and Vercel Static BroadcastChannel!
+ * Subscribes to Realtime PostgreSQL changes on `standup_updates` filtered by `team_id`.
+ * Handles INSERT, UPDATE, and DELETE events and returns a cleanup function.
  */
 export function subscribeToTeamStandups(
   teamId: string,
-  onPayload: (payload: {
-    eventType: 'INSERT' | 'UPDATE' | 'DELETE';
-    new: any;
-    old: any;
-  }) => void,
+  onPayload: RealtimeCallback,
   onStatusChange?: (status: 'SUBSCRIBED' | 'ERROR') => void
 ): () => void {
-  // Always register local listener so BroadcastChannel / fallback updates arrive immediately
-  if (!localRealtimeListeners.has(teamId)) {
-    localRealtimeListeners.set(teamId, new Set());
+  if (!localStandupListeners.has(teamId)) {
+    localStandupListeners.set(teamId, new Set());
   }
-  localRealtimeListeners.get(teamId)!.add(onPayload);
+  localStandupListeners.get(teamId)!.add(onPayload);
 
-  // 1. If external Supabase is configured, subscribe via Supabase Realtime channel
   if (supabase) {
     const channel = supabase
       .channel(`standup_updates:team_${teamId}`)
@@ -1087,6 +1188,7 @@ export function subscribeToTeamStandups(
         },
         (payload) => {
           onPayload({
+            table: 'standup_updates',
             eventType: payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE',
             new: payload.new,
             old: payload.old,
@@ -1101,12 +1203,11 @@ export function subscribeToTeamStandups(
       });
 
     return () => {
-      localRealtimeListeners.get(teamId)?.delete(onPayload);
+      localStandupListeners.get(teamId)?.delete(onPayload);
       supabase.removeChannel(channel);
     };
   }
 
-  // 2. Built-in SSE stream with graceful fallback for Vercel static hosting
   let eventSource: EventSource | null = null;
   try {
     eventSource = new EventSource(`/api/teams/${teamId}/realtime`);
@@ -1122,25 +1223,25 @@ export function subscribeToTeamStandups(
           onStatusChange?.('SUBSCRIBED');
           return;
         }
+        if (parsed.table && parsed.table !== 'standup_updates') return;
         if (
           parsed.eventType === 'INSERT' ||
           parsed.eventType === 'UPDATE' ||
           parsed.eventType === 'DELETE'
         ) {
           onPayload({
+            table: 'standup_updates',
             eventType: parsed.eventType,
             new: parsed.new,
             old: parsed.old,
           });
         }
       } catch {
-        // Ignore non-JSON messages
+        // Ignore non-JSON heartbeat
       }
     };
 
     eventSource.onerror = () => {
-      // On Vercel static hosting, /api/teams/:id/realtime is not present;
-      // close SSE and rely on BroadcastChannel realtime without showing an error state.
       eventSource?.close();
       onStatusChange?.('SUBSCRIBED');
     };
@@ -1149,7 +1250,101 @@ export function subscribeToTeamStandups(
   }
 
   return () => {
-    localRealtimeListeners.get(teamId)?.delete(onPayload);
+    localStandupListeners.get(teamId)?.delete(onPayload);
+    eventSource?.close();
+  };
+}
+
+/**
+ * Subscribes to Realtime PostgreSQL changes on `chat_messages` filtered by `team_id`.
+ * Handles INSERT, UPDATE, and DELETE events and returns a cleanup function.
+ */
+export function subscribeToTeamChat(
+  teamId: string,
+  onPayload: RealtimeCallback,
+  onStatusChange?: (status: 'SUBSCRIBED' | 'ERROR') => void
+): () => void {
+  if (!localChatListeners.has(teamId)) {
+    localChatListeners.set(teamId, new Set());
+  }
+  localChatListeners.get(teamId)!.add(onPayload);
+
+  if (supabase) {
+    const channel = supabase
+      .channel(`chat_messages:team_${teamId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'chat_messages',
+          filter: `team_id=eq.${teamId}`,
+        },
+        (payload) => {
+          onPayload({
+            table: 'chat_messages',
+            eventType: payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE',
+            new: payload.new,
+            old: payload.old,
+          });
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') onStatusChange?.('SUBSCRIBED');
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          onStatusChange?.('SUBSCRIBED');
+        }
+      });
+
+    return () => {
+      localChatListeners.get(teamId)?.delete(onPayload);
+      supabase.removeChannel(channel);
+    };
+  }
+
+  let eventSource: EventSource | null = null;
+  try {
+    eventSource = new EventSource(`/api/teams/${teamId}/realtime`);
+
+    eventSource.onopen = () => {
+      onStatusChange?.('SUBSCRIBED');
+    };
+
+    eventSource.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        if (parsed.type === 'SUBSCRIBED') {
+          onStatusChange?.('SUBSCRIBED');
+          return;
+        }
+        if (parsed.table !== 'chat_messages') return;
+        if (
+          parsed.eventType === 'INSERT' ||
+          parsed.eventType === 'UPDATE' ||
+          parsed.eventType === 'DELETE'
+        ) {
+          onPayload({
+            table: 'chat_messages',
+            eventType: parsed.eventType,
+            new: parsed.new,
+            old: parsed.old,
+          });
+        }
+      } catch {
+        // Ignore non-JSON heartbeat
+      }
+    };
+
+    eventSource.onerror = () => {
+      eventSource?.close();
+      onStatusChange?.('SUBSCRIBED');
+    };
+  } catch {
+    onStatusChange?.('SUBSCRIBED');
+  }
+
+  return () => {
+    localChatListeners.get(teamId)?.delete(onPayload);
     eventSource?.close();
   };
 }

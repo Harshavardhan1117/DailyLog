@@ -12,8 +12,8 @@ import { SqlSetupModal } from './components/SqlSetupModal.tsx';
 import { Landing } from './pages/Landing.tsx';
 import { Login } from './pages/Login.tsx';
 import { Teams } from './pages/Teams.tsx';
-import { TeamBoard } from './pages/TeamBoard.tsx';
-import { TeamHistory } from './pages/TeamHistory.tsx';
+import { TeamWorkspace } from './pages/TeamWorkspace.tsx';
+import { History } from './pages/History.tsx';
 import { Profile } from './pages/Profile.tsx';
 
 export default function App() {
@@ -41,7 +41,15 @@ export default function App() {
                 path="/team/:teamId"
                 element={
                   <ProtectedRoute>
-                    <TeamBoard />
+                    <TeamWorkspace />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/team/:teamId/chat"
+                element={
+                  <ProtectedRoute>
+                    <TeamWorkspace />
                   </ProtectedRoute>
                 }
               />
@@ -49,7 +57,7 @@ export default function App() {
                 path="/team/:teamId/history"
                 element={
                   <ProtectedRoute>
-                    <TeamHistory />
+                    <History />
                   </ProtectedRoute>
                 }
               />
@@ -67,7 +75,7 @@ export default function App() {
 
           <footer className="border-t border-slate-200 bg-white py-5">
             <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-              <span>Daily Standup Log · Async Team Bulletin Board</span>
+              <span>Team Collaboration · Standups & Realtime Team Chat</span>
               <button
                 type="button"
                 onClick={() => setSqlModalOpen(true)}

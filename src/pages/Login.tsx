@@ -3,8 +3,7 @@ import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.tsx';
 
 /**
- * Login & Signup page (/login).
- * Supports one-click Google Sign-In as well as Email/Password sign up & login.
+ * Login & Signup page (/login) for Team Collaboration.
  */
 export function Login() {
   const {
@@ -35,7 +34,7 @@ export function Login() {
       await loginWithGoogle();
       navigate(from, { replace: true });
     } catch {
-      // Error is handled and displayed via authError state
+      // Error is displayed via authError
     } finally {
       setSubmitting(false);
     }
@@ -52,7 +51,7 @@ export function Login() {
       }
       navigate(from, { replace: true });
     } catch {
-      // Friendly error message is set in useAuth
+      // Error is displayed via authError
     } finally {
       setSubmitting(false);
     }
@@ -64,13 +63,13 @@ export function Login() {
         <div>
           <h1 className="text-xl font-bold text-slate-900">
             {mode === 'login'
-              ? 'Sign in to Daily Standup Log'
-              : 'Create your account'}
+              ? 'Sign in to Team Collaboration'
+              : 'Create your Team Collaboration account'}
           </h1>
           <p className="mt-1 text-xs text-slate-500">
             {mode === 'login'
-              ? 'Access your team bulletin boards and post today’s status update.'
-              : 'Join your team and start sharing daily standups in under a minute.'}
+              ? 'Open your team workspace to share standup updates and chat in real time.'
+              : 'Join your team workspace in under a minute.'}
           </p>
         </div>
 
@@ -195,7 +194,6 @@ export function Login() {
           <div className="grow border-t border-slate-200" />
         </div>
 
-        {/* Google OAuth / Quick Sign-In Button */}
         <button
           type="button"
           onClick={handleGoogleLogin}

@@ -95,6 +95,12 @@ export function TeamCard({ team }: TeamCardProps) {
 
         <div className="flex items-center gap-3 shrink-0">
           <Link
+            to={`/team/${team.id}/chat`}
+            className="text-xs font-medium text-slate-600 hover:text-slate-900 transition-colors whitespace-nowrap"
+          >
+            Chat
+          </Link>
+          <Link
             to={`/team/${team.id}/history`}
             className="text-xs font-medium text-slate-600 hover:text-slate-900 transition-colors whitespace-nowrap"
           >
@@ -104,7 +110,7 @@ export function TeamCard({ team }: TeamCardProps) {
             to={`/team/${team.id}`}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap"
           >
-            <span>Open Board</span>
+            <span>Open Workspace</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </Link>
         </div>

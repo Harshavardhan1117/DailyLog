@@ -4,11 +4,12 @@ import { apiRequest } from '../lib/supabase.ts';
 
 /**
  * Profile settings page (/profile).
- * Allows authenticated users to view their account email and update their display name and role/title.
+ * Allows users to edit Username, Avatar URL, and Basic profile information (Role/Title).
  */
 export function Profile() {
   const { user, profile, refreshProfile } = useAuth();
   const [fullName, setFullName] = useState('');
+  const [avatarUrl, setAvatarUrl] = useState('');
   const [jobTitle, setJobTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
@@ -19,6 +20,7 @@ export function Profile() {
   useEffect(() => {
     if (profile) {
       setFullName(profile.fullName || '');
+      setAvatarUrl(profile.avatarUrl || '');
       setJobTitle(profile.jobTitle || '');
     }
   }, [profile]);
@@ -32,6 +34,7 @@ export function Profile() {
         method: 'PUT',
         body: {
           fullName: fullName.trim(),
+          avatarUrl: avatarUrl.trim(),
           jobTitle: jobTitle.trim(),
         },
       });
@@ -55,7 +58,7 @@ export function Profile() {
       <div className="border-b border-slate-200 pb-4">
         <h1 className="text-2xl font-bold text-slate-900">Profile Settings</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Manage how your name and role appear on your team&apos;s standup cards.
+          Edit your username, avatar, and basic profile details shown across your teams.
         </p>
       </div>
 
@@ -86,9 +89,6 @@ export function Profile() {
             disabled
             className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2 text-sm text-slate-500 cursor-not-allowed"
           />
-          <p className="mt-1 text-xs text-slate-400">
-            Linked to your authenticated account.
-          </p>
         </div>
 
         <div>
@@ -96,7 +96,7 @@ export function Profile() {
             htmlFor="profile-name"
             className="block text-xs font-semibold text-slate-700 mb-1"
           >
-            Display Name
+            Username / Full Name
           </label>
           <input
             id="profile-name"
@@ -111,17 +111,38 @@ export function Profile() {
 
         <div>
           <label
+            htmlFor="profile-avatar"
+            className="block text-xs font-semibold text-slate-700 mb-1"
+          >
+            Avatar URL{' '}
+            <span className="text-slate-400 font-normal">
+              (optional — initials are used if blank)
+            </span>
+          </label>
+          <input
+            id="profile-avatar"
+            type="url"
+            value={avatarUrl}
+            onChange={(e) => setAvatarUrl(e.target.value)}
+            placeholder="https://example.com/avatar.png"
+            className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-900"
+          />
+        </div>
+
+        <div>
+          <label
             htmlFor="profile-title"
             className="block text-xs font-semibold text-slate-700 mb-1"
           >
-            Role / Title <span className="text-slate-400 font-normal">(optional)</span>
+            Role / Basic Info{' '}
+            <span className="text-slate-400 font-normal">(optional)</span>
           </label>
           <input
             id="profile-title"
             type="text"
             value={jobTitle}
             onChange={(e) => setJobTitle(e.target.value)}
-            placeholder="e.g., Backend Engineer, Product Designer"
+            placeholder="e.g., Full-Stack Developer, Product Designer"
             className="w-full rounded-lg border border-slate-300 px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:border-slate-900"
           />
         </div>

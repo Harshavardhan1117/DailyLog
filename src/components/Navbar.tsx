@@ -7,10 +7,10 @@ interface NavbarProps {
 }
 
 /**
- * Main navigation bar adhering to the strict 3-zone Top Bar Contract:
- * Zone 1: Brand title (single text element)
- * Zone 2: Clean typography navigation links
- * Zone 3: Primary actions (Profile / Logout or Sign In)
+ * Main navigation bar using the product name "Team Collaboration" everywhere.
+ * Zone 1: Brand title ("Team Collaboration")
+ * Zone 2: Navigation links (My Teams, Profile, SQL & RLS Guide)
+ * Zone 3: User action (Logout or Sign In)
  */
 export function Navbar({ onOpenSqlDocs }: NavbarProps) {
   const { user, profile, logout } = useAuth();
@@ -33,7 +33,7 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
           to={user ? '/teams' : '/'}
           className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
         >
-          Daily Standup Log
+          Team Collaboration
         </Link>
 
         {/* Zone 2: Clean text navigation links */}
@@ -82,7 +82,7 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
           </button>
         </nav>
 
-        {/* Zone 3: 1-2 primary actions */}
+        {/* Zone 3: Primary actions */}
         <div className="flex items-center gap-3 shrink-0">
           {user ? (
             <>
@@ -106,7 +106,7 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
               to="/login"
               className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap"
             >
-              Sign In
+              Login
             </Link>
           )}
         </div>

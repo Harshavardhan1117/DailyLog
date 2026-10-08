@@ -15,9 +15,15 @@ import {
   getUserTeams,
   createTeamForUser,
   joinTeamByInviteCode,
+  leaveTeamForUser,
+  removeTeamMember,
   getTeamBoardData,
   upsertStandupUpdate,
   deleteStandupUpdate,
+  getTeamChatMessages,
+  createChatMessage,
+  updateChatMessage,
+  deleteChatMessage,
   seedDemoTeamForUser,
   simulateTeammateRealtimeUpdate,
 } from './src/db/queries.ts';
@@ -36,7 +42,9 @@ app.post('/api/auth/signup', async (req, res) => {
   try {
     const { email, password, fullName } = req.body;
     if (!email || typeof email !== 'string' || !email.trim()) {
-      return res.status(400).json({ error: 'Please enter a valid email address.' });
+      return res
+        .status(400)
+        .json({ error: 'Please enter a valid email address.' });
     }
     if (!password || typeof password !== 'string' || password.length < 6) {
       return res
@@ -88,7 +96,9 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/quick-session', async (req, res) => {
   try {
     const { email, fullName } = req.body;
-    const targetEmail = (email || 'member@standuplog.dev').trim().toLowerCase();
+    const targetEmail = (email || 'alex.morgan@teamcollab.dev')
+      .trim()
+      .toLowerCase();
     const uid = `user-${Buffer.from(targetEmail).toString('hex').slice(0, 20)}`;
     const profile = await getOrCreateProfile(
       uid,
@@ -108,12 +118,15 @@ app.post('/api/auth/quick-session', async (req, res) => {
   }
 });
 
-// Realtime SSE Subscribers mapped by teamId
+// ---------------------------------------------------------------------------
+// Realtime SSE Subscribers mapped by teamId (for standup_updates & chat_messages)
+// ---------------------------------------------------------------------------
 const teamSubscribers = new Map<string, Set<Response>>();
 
 function broadcastRealtimeEvent(
   teamId: string,
   payload: {
+    table: 'standup_updates' | 'chat_messages';
     eventType: 'INSERT' | 'UPDATE' | 'DELETE';
     new: any;
     old: any;
@@ -123,7 +136,6 @@ function broadcastRealtimeEvent(
   if (!clients || clients.size === 0) return;
 
   const dataString = `data: ${JSON.stringify({
-    table: 'standup_updates',
     schema: 'public',
     ...payload,
   })}\n\n`;
@@ -145,16 +157,15 @@ function getTodayDateString(queryDate?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// API Routes (Secured with Firebase Auth & PostgreSQL)
+// Profile & Team API Routes
 // ---------------------------------------------------------------------------
 
-// 1. Get or initialize current user's profile
 app.get('/api/profile', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     const profile = await getOrCreateProfile(
       user.uid,
-      user.email || 'member@standuplog.dev',
+      user.email || 'member@teamcollab.dev',
       user.name,
       user.picture
     );
@@ -165,32 +176,33 @@ app.get('/api/profile', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// 2. Update current user's profile
 app.put('/api/profile', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
-    const { fullName, jobTitle } = req.body;
+    const { fullName, jobTitle, avatarUrl } = req.body;
     if (!fullName || typeof fullName !== 'string' || !fullName.trim()) {
-      return res.status(400).json({ error: 'Display name cannot be empty.' });
+      return res.status(400).json({ error: 'Username cannot be empty.' });
     }
     const profile = await updateProfile(user.uid, {
       fullName,
       jobTitle: jobTitle || '',
+      avatarUrl,
     });
     res.json({ profile });
   } catch (error: any) {
     console.error('Failed to update profile:', error);
-    res.status(500).json({ error: error.message || 'Failed to update profile.' });
+    res
+      .status(500)
+      .json({ error: error.message || 'Failed to update profile.' });
   }
 });
 
-// 3. List current user's teams
 app.get('/api/teams', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     await getOrCreateProfile(
       user.uid,
-      user.email || 'member@standuplog.dev',
+      user.email || 'member@teamcollab.dev',
       user.name,
       user.picture
     );
@@ -203,7 +215,6 @@ app.get('/api/teams', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// 4. Create a new team
 app.post('/api/teams', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
@@ -213,7 +224,7 @@ app.post('/api/teams', requireAuth, async (req: AuthRequest, res) => {
     }
     await getOrCreateProfile(
       user.uid,
-      user.email || 'member@standuplog.dev',
+      user.email || 'member@teamcollab.dev',
       user.name,
       user.picture
     );
@@ -225,17 +236,18 @@ app.post('/api/teams', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// 5. Join a team via invite code
 app.post('/api/teams/join', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     const { inviteCode } = req.body;
     if (!inviteCode || typeof inviteCode !== 'string' || !inviteCode.trim()) {
-      return res.status(400).json({ error: 'Please enter a valid invite code.' });
+      return res
+        .status(400)
+        .json({ error: 'Please enter a valid invite code.' });
     }
     await getOrCreateProfile(
       user.uid,
-      user.email || 'member@standuplog.dev',
+      user.email || 'member@teamcollab.dev',
       user.name,
       user.picture
     );
@@ -248,13 +260,53 @@ app.post('/api/teams/join', requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
-// 6. Seed a demo team with sample updates for quick onboarding
+app.delete(
+  '/api/teams/:teamId/leave',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId } = req.params;
+      await leaveTeamForUser(user.uid, teamId);
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error('Failed to leave team:', error);
+      res
+        .status(500)
+        .json({ error: error.message || 'Could not leave team.' });
+    }
+  }
+);
+
+app.delete(
+  '/api/teams/:teamId/members/:memberId',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId, memberId } = req.params;
+      const result = await removeTeamMember(user.uid, teamId, memberId);
+      res.json(result);
+    } catch (error: any) {
+      console.error('Failed to remove member:', error);
+      if (error.message === 'FORBIDDEN_NOT_OWNER') {
+        return res
+          .status(403)
+          .json({ error: 'Only the team owner can remove members.' });
+      }
+      res
+        .status(500)
+        .json({ error: error.message || 'Could not remove member.' });
+    }
+  }
+);
+
 app.post('/api/teams/seed-demo', requireAuth, async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     await getOrCreateProfile(
       user.uid,
-      user.email || 'member@standuplog.dev',
+      user.email || 'member@teamcollab.dev',
       user.name,
       user.picture
     );
@@ -263,75 +315,92 @@ app.post('/api/teams/seed-demo', requireAuth, async (req: AuthRequest, res) => {
     res.status(201).json({ team });
   } catch (error: any) {
     console.error('Failed to seed demo team:', error);
-    res.status(500).json({ error: error.message || 'Failed to create demo team.' });
+    res
+      .status(500)
+      .json({ error: error.message || 'Failed to create demo team.' });
   }
 });
 
-// 7. Fetch team bulletin board data (for a specific date or all history)
-app.get('/api/teams/:teamId/board', requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const user = req.user!;
-    const { teamId } = req.params;
-    const dateFilter = req.query.date as string | undefined;
-    const boardData = await getTeamBoardData(user.uid, teamId, dateFilter);
-    res.json(boardData);
-  } catch (error: any) {
-    console.error('Failed to fetch team board:', error);
-    if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') {
-      return res.status(403).json({
-        error: 'Access denied. You must be a member of this team to view its bulletin board.',
-      });
+// ---------------------------------------------------------------------------
+// Standup Board Routes
+// ---------------------------------------------------------------------------
+
+app.get(
+  '/api/teams/:teamId/board',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId } = req.params;
+      const dateFilter = req.query.date as string | undefined;
+      const boardData = await getTeamBoardData(user.uid, teamId, dateFilter);
+      res.json(boardData);
+    } catch (error: any) {
+      console.error('Failed to fetch team board:', error);
+      if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') {
+        return res.status(403).json({
+          error:
+            'Access denied. You must be a member of this team to view its workspace.',
+        });
+      }
+      if (error.message === 'TEAM_NOT_FOUND') {
+        return res.status(404).json({ error: 'Team not found.' });
+      }
+      res
+        .status(500)
+        .json({ error: error.message || 'Failed to load team workspace.' });
     }
-    if (error.message === 'TEAM_NOT_FOUND') {
-      return res.status(404).json({ error: 'Team not found.' });
-    }
-    res.status(500).json({ error: error.message || 'Failed to load team board.' });
   }
-});
+);
 
-// 8. Create or edit today's standup update
-app.post('/api/teams/:teamId/updates', requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const user = req.user!;
-    const { teamId } = req.params;
-    const { updateDate, workedOn, nextPlan, blockers } = req.body;
+app.post(
+  '/api/teams/:teamId/updates',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId } = req.params;
+      const { updateDate, workedOn, nextPlan, blockers } = req.body;
 
-    if (!workedOn || !workedOn.trim() || !nextPlan || !nextPlan.trim()) {
-      return res.status(400).json({
-        error: 'Please fill in both "What did you work on?" and "What are you working on next?".',
+      if (!workedOn || !workedOn.trim() || !nextPlan || !nextPlan.trim()) {
+        return res.status(400).json({
+          error:
+            'Please fill in both "What did you work on?" and "What are you working on next?".',
+        });
+      }
+
+      const targetDate = getTodayDateString(updateDate);
+      const result = await upsertStandupUpdate(
+        user.uid,
+        teamId,
+        targetDate,
+        workedOn,
+        nextPlan,
+        blockers || 'None.'
+      );
+
+      broadcastRealtimeEvent(teamId, {
+        table: 'standup_updates',
+        eventType: result.eventType as 'INSERT' | 'UPDATE',
+        new: result.record,
+        old: null,
+      });
+
+      res.json({ update: result.record, eventType: result.eventType });
+    } catch (error: any) {
+      console.error('Failed to save standup update:', error);
+      if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') {
+        return res.status(403).json({
+          error: 'You are not authorized to post updates to this team.',
+        });
+      }
+      res.status(500).json({
+        error: error.message || 'Failed to submit standup update.',
       });
     }
-
-    const targetDate = getTodayDateString(updateDate);
-    const result = await upsertStandupUpdate(
-      user.uid,
-      teamId,
-      targetDate,
-      workedOn,
-      nextPlan,
-      blockers || 'None.'
-    );
-
-    // Broadcast to all Realtime subscribers viewing this team
-    broadcastRealtimeEvent(teamId, {
-      eventType: result.eventType as 'INSERT' | 'UPDATE',
-      new: result.record,
-      old: null,
-    });
-
-    res.json({ update: result.record, eventType: result.eventType });
-  } catch (error: any) {
-    console.error('Failed to save standup update:', error);
-    if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') {
-      return res.status(403).json({
-        error: 'You are not authorized to post updates to this team.',
-      });
-    }
-    res.status(500).json({ error: error.message || 'Failed to submit standup update.' });
   }
-});
+);
 
-// 9. Simulate a teammate posting a live update (for testing Realtime in 1 click)
 app.post(
   '/api/teams/:teamId/simulate-realtime',
   requireAuth,
@@ -348,6 +417,7 @@ app.post(
       );
 
       broadcastRealtimeEvent(teamId, {
+        table: 'standup_updates',
         eventType: result.eventType as 'INSERT' | 'UPDATE',
         new: result.record,
         old: null,
@@ -363,35 +433,169 @@ app.post(
   }
 );
 
-// 10. Delete user's own standup update
-app.delete('/api/updates/:updateId', requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const user = req.user!;
-    const { updateId } = req.params;
-    const deleted = await deleteStandupUpdate(user.uid, updateId);
+app.delete(
+  '/api/updates/:updateId',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { updateId } = req.params;
+      const deleted = await deleteStandupUpdate(user.uid, updateId);
 
-    broadcastRealtimeEvent(deleted.teamId, {
-      eventType: 'DELETE',
-      new: null,
-      old: { id: deleted.id, teamId: deleted.teamId, userId: deleted.userId },
-    });
+      broadcastRealtimeEvent(deleted.teamId, {
+        table: 'standup_updates',
+        eventType: 'DELETE',
+        new: null,
+        old: { id: deleted.id, teamId: deleted.teamId, userId: deleted.userId },
+      });
 
-    res.json({ deletedId: deleted.id });
-  } catch (error: any) {
-    console.error('Failed to delete standup update:', error);
-    if (error.message === 'FORBIDDEN_NOT_OWNER') {
-      return res.status(403).json({
-        error: 'You can only delete your own daily standup update.',
+      res.json({ deletedId: deleted.id });
+    } catch (error: any) {
+      console.error('Failed to delete standup update:', error);
+      if (error.message === 'FORBIDDEN_NOT_OWNER') {
+        return res.status(403).json({
+          error: 'You can only delete your own daily standup update.',
+        });
+      }
+      if (error.message === 'UPDATE_NOT_FOUND') {
+        return res.status(404).json({ error: 'Standup update not found.' });
+      }
+      res
+        .status(500)
+        .json({ error: error.message || 'Failed to delete update.' });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Group Chat Routes (chat_messages)
+// ---------------------------------------------------------------------------
+
+app.get(
+  '/api/teams/:teamId/chat',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId } = req.params;
+      const messages = await getTeamChatMessages(user.uid, teamId);
+      res.json({ messages });
+    } catch (error: any) {
+      console.error('Failed to fetch chat messages:', error);
+      if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') {
+        return res.status(403).json({
+          error: 'You must be a member of this team to read chat messages.',
+        });
+      }
+      res.status(500).json({
+        error: 'Unable to load chat messages. Please try again.',
       });
     }
-    if (error.message === 'UPDATE_NOT_FOUND') {
-      return res.status(404).json({ error: 'Standup update not found.' });
-    }
-    res.status(500).json({ error: error.message || 'Failed to delete update.' });
   }
-});
+);
 
-// 11. Realtime stream for a team board (PostgreSQL change notifications)
+app.post(
+  '/api/teams/:teamId/chat',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { teamId } = req.params;
+      const { message } = req.body;
+
+      if (!message || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: 'Message cannot be empty.' });
+      }
+
+      const created = await createChatMessage(user.uid, teamId, message);
+
+      broadcastRealtimeEvent(teamId, {
+        table: 'chat_messages',
+        eventType: 'INSERT',
+        new: created,
+        old: null,
+      });
+
+      res.status(201).json({ message: created });
+    } catch (error: any) {
+      console.error('Failed to send chat message:', error);
+      res.status(500).json({
+        error: 'Unable to send message. Please try again.',
+      });
+    }
+  }
+);
+
+app.put(
+  '/api/chat/:messageId',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { messageId } = req.params;
+      const { message } = req.body;
+      if (!message || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: 'Message cannot be empty.' });
+      }
+
+      const updated = await updateChatMessage(user.uid, messageId, message);
+
+      broadcastRealtimeEvent(updated.teamId, {
+        table: 'chat_messages',
+        eventType: 'UPDATE',
+        new: updated,
+        old: null,
+      });
+
+      res.json({ message: updated });
+    } catch (error: any) {
+      console.error('Failed to update chat message:', error);
+      if (error.message === 'FORBIDDEN_NOT_OWNER') {
+        return res
+          .status(403)
+          .json({ error: 'You can only edit your own messages.' });
+      }
+      res.status(500).json({
+        error: 'Unable to update message. Please try again.',
+      });
+    }
+  }
+);
+
+app.delete(
+  '/api/chat/:messageId',
+  requireAuth,
+  async (req: AuthRequest, res) => {
+    try {
+      const user = req.user!;
+      const { messageId } = req.params;
+      const deleted = await deleteChatMessage(user.uid, messageId);
+
+      broadcastRealtimeEvent(deleted.teamId, {
+        table: 'chat_messages',
+        eventType: 'DELETE',
+        new: null,
+        old: { id: deleted.id, teamId: deleted.teamId, userId: deleted.userId },
+      });
+
+      res.json({ deletedId: deleted.id });
+    } catch (error: any) {
+      console.error('Failed to delete chat message:', error);
+      if (error.message === 'FORBIDDEN_NOT_OWNER') {
+        return res
+          .status(403)
+          .json({ error: 'You can only delete your own messages.' });
+      }
+      res.status(500).json({
+        error: 'Unable to delete message. Please try again.',
+      });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Realtime stream for a team workspace (standup_updates & chat_messages)
+// ---------------------------------------------------------------------------
 app.get('/api/teams/:teamId/realtime', (req, res) => {
   const { teamId } = req.params;
 
@@ -442,7 +646,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Daily Standup Log server running on http://0.0.0.0:${PORT}`);
+    console.log(`Team Collaboration server running on http://0.0.0.0:${PORT}`);
   });
 }
 

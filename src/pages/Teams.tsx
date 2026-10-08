@@ -277,7 +277,7 @@ export function Teams() {
       {teams.length === 0 ? (
         <EmptyState
           title="You haven’t joined any teams yet"
-          description="Create your first team bulletin board, enter an invite code from a teammate, or load a ready-made demo team with Harsh, Rahul, and Priya to explore how Daily Standup Log works."
+          description="Create your first team workspace, enter an invite code from a teammate, or load a ready-made demo team with Harsh, Rahul, Ananya, and Kiran to explore Standups and Realtime Chat."
           actionLabel="Create Your First Team"
           onAction={() => setShowCreateForm(true)}
           secondaryActionLabel={
@@ -295,7 +295,7 @@ export function Teams() {
 
           <div className="pt-2 flex items-center justify-between text-xs text-slate-500 border-t border-slate-200">
             <span>
-              Want to test with sample teammates (Harsh, Rahul, Priya)?
+              Want to test with sample teammates (Harsh, Rahul, Ananya, Kiran)?
             </span>
             <button
               type="button"

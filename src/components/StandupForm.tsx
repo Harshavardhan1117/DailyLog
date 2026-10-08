@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { StandupUpdateItem } from '../hooks/useRealtimeStandups.ts';
+import { StandupUpdateItem } from '../hooks/useStandupRealtime.ts';
 
 interface StandupFormProps {
   existingUpdate: StandupUpdateItem | null;
@@ -13,13 +13,13 @@ interface StandupFormProps {
 }
 
 /**
- * Simple three-question daily standup form:
+ * Three-question daily standup form:
  * 1. What did you work on?
  * 2. What are you working on next?
  * 3. Any blockers?
  *
- * Shows [ Post Update ] when the user has not posted today, or [ Edit Update ]
- * when the user already has today's update.
+ * Shows [ Post Today's Update ] when the user has not posted today,
+ * or [ Edit Today's Update ] when the user already submitted today's update.
  */
 export function StandupForm({
   existingUpdate,
@@ -47,16 +47,16 @@ export function StandupForm({
     }
   }, [existingUpdate, isEditingOpen]);
 
-  // If the user already posted today and hasn't clicked "Edit Update", show a compact banner
+  // Show status banner with [ Edit Today's Update ] when user has already posted today
   if (existingUpdate && !isEditingOpen) {
     return (
       <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">
-            You have posted today&apos;s standup update
+            You have already submitted today&apos;s standup update
           </h2>
           <p className="mt-0.5 text-xs text-slate-600">
-            Need to add progress or report a new blocker? You can update your entry anytime today.
+            You can edit your update anytime if your progress or blockers change.
           </p>
         </div>
         <button
@@ -64,7 +64,7 @@ export function StandupForm({
           onClick={() => setIsEditingOpen(true)}
           className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
-          Edit Update
+          Edit Today&apos;s Update
         </button>
       </div>
     );
@@ -76,7 +76,7 @@ export function StandupForm({
 
     if (!workedOn.trim() || !nextPlan.trim()) {
       setError(
-        'Please fill out both "Worked on" and "Next" before posting your update.'
+        'Please fill out both "What did you work on?" and "What are you working on next?".'
       );
       return;
     }
@@ -91,7 +91,7 @@ export function StandupForm({
       setIsEditingOpen(false);
     } catch (err: any) {
       setError(
-        err?.message || 'Could not save your update. Please try again.'
+        err?.message || 'Unable to submit standup update. Please try again.'
       );
     } finally {
       setSubmitting(false);
@@ -106,10 +106,10 @@ export function StandupForm({
       <div className="flex items-center justify-between gap-4">
         <div>
           <h2 className="text-base font-bold text-slate-900">
-            {existingUpdate ? "Edit Today's Update" : "Post Today's Standup Update"}
+            {existingUpdate ? "Edit Today's Update" : "Post Today's Update"}
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Share a quick three-question check-in with your team.
+            Share a structured three-question status check-in with your team.
           </p>
         </div>
         {existingUpdate && (
@@ -137,14 +137,14 @@ export function StandupForm({
           htmlFor="worked-on"
           className="block text-xs font-semibold text-slate-700 mb-1.5"
         >
-          1. Worked on <span className="text-slate-400 font-normal">(What did you work on?)</span>
+          1. What did you work on?
         </label>
         <textarea
           id="worked-on"
           rows={2}
           value={workedOn}
           onChange={(e) => setWorkedOn(e.target.value)}
-          placeholder="e.g., Completed the DBMS schema and tested authentication routes."
+          placeholder="e.g., Completed the DBMS schema."
           className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-slate-900 transition-colors"
           required
         />
@@ -155,14 +155,14 @@ export function StandupForm({
           htmlFor="next-plan"
           className="block text-xs font-semibold text-slate-700 mb-1.5"
         >
-          2. Next <span className="text-slate-400 font-normal">(What are you working on next?)</span>
+          2. What are you working on next?
         </label>
         <textarea
           id="next-plan"
           rows={2}
           value={nextPlan}
           onChange={(e) => setNextPlan(e.target.value)}
-          placeholder="e.g., Build the team bulletin board and wire up Realtime updates."
+          placeholder="e.g., Build the dashboard."
           className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-slate-900 transition-colors"
           required
         />
@@ -173,14 +173,17 @@ export function StandupForm({
           htmlFor="blockers"
           className="block text-xs font-semibold text-slate-700 mb-1.5"
         >
-          3. Blockers <span className="text-slate-400 font-normal">(Any blockers? Leave blank if none)</span>
+          3. Any blockers?{' '}
+          <span className="text-slate-400 font-normal">
+            (Leave blank if none)
+          </span>
         </label>
         <textarea
           id="blockers"
           rows={2}
           value={blockers}
           onChange={(e) => setBlockers(e.target.value)}
-          placeholder="None. (Or describe what you're waiting on)"
+          placeholder="None. (Or describe what is blocking your progress)"
           className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-slate-900 transition-colors"
         />
       </div>
@@ -203,8 +206,8 @@ export function StandupForm({
           {submitting
             ? 'Saving...'
             : existingUpdate
-            ? 'Edit Update'
-            : 'Post Update'}
+            ? "Edit Today's Update"
+            : "Post Today's Update"}
         </button>
       </div>
     </form>

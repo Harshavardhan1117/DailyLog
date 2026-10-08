@@ -1,16 +1,23 @@
 import { db } from './index.ts';
-import { profiles, teams, teamMembers, standupUpdates } from './schema.ts';
-import { eq, and, desc } from 'drizzle-orm';
+import {
+  profiles,
+  teams,
+  teamMembers,
+  standupUpdates,
+  chatMessages,
+} from './schema.ts';
+import { eq, and, desc, asc } from 'drizzle-orm';
 import crypto from 'crypto';
 
 /**
  * Generates a short readable invite code (e.g. "TEAM-7F4A92")
  */
 function generateInviteCode(name: string): string {
-  const prefix = name
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toUpperCase()
-    .slice(0, 4) || 'TEAM';
+  const prefix =
+    name
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toUpperCase()
+      .slice(0, 4) || 'TEAM';
   const suffix = crypto.randomBytes(3).toString('hex').toUpperCase();
   return `${prefix}-${suffix}`;
 }
@@ -137,7 +144,7 @@ export async function getOrCreateProfile(
       .where(eq(profiles.id, uid));
 
     if (existing.length > 0) {
-      return existing[0];
+      return sanitizeProfile(existing[0]);
     }
 
     const result = await db
@@ -146,7 +153,7 @@ export async function getOrCreateProfile(
         id: uid,
         email,
         fullName: defaultName,
-        jobTitle: 'Software Engineer',
+        jobTitle: 'Team Member',
         avatarUrl: avatarUrl || '',
       })
       .onConflictDoUpdate({
@@ -158,7 +165,7 @@ export async function getOrCreateProfile(
       })
       .returning();
 
-    return result[0];
+    return sanitizeProfile(result[0]);
   } catch (error) {
     console.error('Database query failed in getOrCreateProfile:', error);
     throw new Error('Could not load user profile. Please try again.', {
@@ -169,20 +176,25 @@ export async function getOrCreateProfile(
 
 export async function updateProfile(
   uid: string,
-  data: { fullName: string; jobTitle: string }
+  data: { fullName: string; jobTitle: string; avatarUrl?: string }
 ) {
   try {
+    const updatePayload: any = {
+      fullName: data.fullName.trim(),
+      jobTitle: data.jobTitle.trim(),
+      updatedAt: new Date(),
+    };
+    if (typeof data.avatarUrl === 'string') {
+      updatePayload.avatarUrl = data.avatarUrl.trim();
+    }
+
     const result = await db
       .update(profiles)
-      .set({
-        fullName: data.fullName.trim(),
-        jobTitle: data.jobTitle.trim(),
-        updatedAt: new Date(),
-      })
+      .set(updatePayload)
       .where(eq(profiles.id, uid))
       .returning();
 
-    return result[0];
+    return sanitizeProfile(result[0]);
   } catch (error) {
     console.error('Database query failed in updateProfile:', error);
     throw new Error('Could not update profile settings.', { cause: error });
@@ -319,9 +331,76 @@ export async function joinTeamByInviteCode(uid: string, inviteCode: string) {
     if (error.message === 'No team found with that invite code.') {
       throw error;
     }
-    throw new Error('Could not join team. Check the invite code and try again.', {
+    throw new Error(
+      'Could not join team. Check the invite code and try again.',
+      { cause: error }
+    );
+  }
+}
+
+/**
+ * Allows a user to leave a team. If the owner leaves and is the only member, deletes the team.
+ */
+export async function leaveTeamForUser(uid: string, teamId: string) {
+  try {
+    await db
+      .delete(teamMembers)
+      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, uid)));
+    return { success: true };
+  } catch (error) {
+    console.error('Database query failed in leaveTeamForUser:', error);
+    throw new Error('Could not leave team. Please try again.', {
       cause: error,
     });
+  }
+}
+
+/**
+ * Allows a team owner to remove a member from the team.
+ */
+export async function removeTeamMember(
+  requesterUid: string,
+  teamId: string,
+  targetUserId: string
+) {
+  try {
+    const foundTeams = await db
+      .select()
+      .from(teams)
+      .where(eq(teams.id, teamId));
+
+    if (foundTeams.length === 0) {
+      throw new Error('TEAM_NOT_FOUND');
+    }
+
+    if (foundTeams[0].ownerId !== requesterUid) {
+      throw new Error('FORBIDDEN_NOT_OWNER');
+    }
+
+    if (targetUserId === requesterUid) {
+      throw new Error('CANNOT_REMOVE_SELF');
+    }
+
+    await db
+      .delete(teamMembers)
+      .where(
+        and(
+          eq(teamMembers.teamId, teamId),
+          eq(teamMembers.userId, targetUserId)
+        )
+      );
+
+    return { removedUserId: targetUserId };
+  } catch (error: any) {
+    console.error('Database query failed in removeTeamMember:', error);
+    if (
+      error.message === 'TEAM_NOT_FOUND' ||
+      error.message === 'FORBIDDEN_NOT_OWNER' ||
+      error.message === 'CANNOT_REMOVE_SELF'
+    ) {
+      throw error;
+    }
+    throw new Error('Could not remove member from team.', { cause: error });
   }
 }
 
@@ -343,7 +422,7 @@ export async function verifyTeamMembership(uid: string, teamId: string) {
 }
 
 /**
- * Loads full team details, members with profiles, and updates (for a specific date or all history).
+ * Loads full team details, members with profiles, and standup updates.
  */
 export async function getTeamBoardData(
   uid: string,
@@ -397,13 +476,16 @@ export async function getTeamBoardData(
 
     const formattedUpdates = updatesRows.map(({ update, author }) => ({
       ...update,
-      author,
+      author: sanitizeProfile(author),
     }));
 
     return {
       team,
       myRole: membership.role,
-      members: membersRows,
+      members: membersRows.map((m) => ({
+        ...m,
+        user: sanitizeProfile(m.user),
+      })),
       updates: formattedUpdates,
     };
   } catch (error: any) {
@@ -414,7 +496,7 @@ export async function getTeamBoardData(
     ) {
       throw error;
     }
-    throw new Error('Failed to load team bulletin board.', { cause: error });
+    throw new Error('Failed to load team workspace.', { cause: error });
   }
 }
 
@@ -487,7 +569,7 @@ export async function upsertStandupUpdate(
       eventType: isInsert ? 'INSERT' : 'UPDATE',
       record: {
         ...saved,
-        author,
+        author: sanitizeProfile(author),
       },
     };
   } catch (error: any) {
@@ -532,35 +614,205 @@ export async function deleteStandupUpdate(uid: string, updateId: string) {
   }
 }
 
+// ============================================================================
+// Group Chat Database Queries (chat_messages)
+// ============================================================================
+
 /**
- * Seeds a demo team with sample teammates (Harsh, Rahul, Priya, Maya) and realistic daily updates
- * so a beginner user can immediately explore the bulletin board, blockers, and history.
+ * Fetches all chat messages for a team ordered oldest-to-newest so newest are at the bottom.
+ */
+export async function getTeamChatMessages(uid: string, teamId: string) {
+  try {
+    const membership = await verifyTeamMembership(uid, teamId);
+    if (!membership) {
+      throw new Error('UNAUTHORIZED_TEAM_ACCESS');
+    }
+
+    const rows = await db
+      .select({
+        msg: chatMessages,
+        author: profiles,
+      })
+      .from(chatMessages)
+      .innerJoin(profiles, eq(chatMessages.userId, profiles.id))
+      .where(eq(chatMessages.teamId, teamId))
+      .orderBy(asc(chatMessages.createdAt));
+
+    return rows.map(({ msg, author }) => ({
+      ...msg,
+      author: sanitizeProfile(author),
+    }));
+  } catch (error: any) {
+    console.error('Database query failed in getTeamChatMessages:', error);
+    if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') throw error;
+    throw new Error('Unable to load chat messages. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Inserts a new chat message in `chat_messages` for a team member.
+ */
+export async function createChatMessage(
+  uid: string,
+  teamId: string,
+  messageText: string
+) {
+  try {
+    const membership = await verifyTeamMembership(uid, teamId);
+    if (!membership) {
+      throw new Error('UNAUTHORIZED_TEAM_ACCESS');
+    }
+
+    const now = new Date();
+    const [created] = await db
+      .insert(chatMessages)
+      .values({
+        id: crypto.randomUUID(),
+        teamId,
+        userId: uid,
+        message: messageText.trim(),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    const [author] = await db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.id, uid));
+
+    return {
+      ...created,
+      author: sanitizeProfile(author),
+    };
+  } catch (error: any) {
+    console.error('Database query failed in createChatMessage:', error);
+    if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') throw error;
+    throw new Error('Unable to send message. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Updates a user's own chat message.
+ */
+export async function updateChatMessage(
+  uid: string,
+  messageId: string,
+  newText: string
+) {
+  try {
+    const found = await db
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.id, messageId));
+
+    if (found.length === 0) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+
+    if (found[0].userId !== uid) {
+      throw new Error('FORBIDDEN_NOT_OWNER');
+    }
+
+    const [updated] = await db
+      .update(chatMessages)
+      .set({
+        message: newText.trim(),
+        updatedAt: new Date(),
+      })
+      .where(eq(chatMessages.id, messageId))
+      .returning();
+
+    const [author] = await db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.id, uid));
+
+    return {
+      ...updated,
+      author: sanitizeProfile(author),
+    };
+  } catch (error: any) {
+    console.error('Database query failed in updateChatMessage:', error);
+    if (
+      error.message === 'MESSAGE_NOT_FOUND' ||
+      error.message === 'FORBIDDEN_NOT_OWNER'
+    ) {
+      throw error;
+    }
+    throw new Error('Unable to update message. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Deletes a user's own chat message.
+ */
+export async function deleteChatMessage(uid: string, messageId: string) {
+  try {
+    const found = await db
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.id, messageId));
+
+    if (found.length === 0) {
+      throw new Error('MESSAGE_NOT_FOUND');
+    }
+
+    if (found[0].userId !== uid) {
+      throw new Error('FORBIDDEN_NOT_OWNER');
+    }
+
+    await db.delete(chatMessages).where(eq(chatMessages.id, messageId));
+    return found[0];
+  } catch (error: any) {
+    console.error('Database query failed in deleteChatMessage:', error);
+    if (
+      error.message === 'MESSAGE_NOT_FOUND' ||
+      error.message === 'FORBIDDEN_NOT_OWNER'
+    ) {
+      throw error;
+    }
+    throw new Error('Unable to delete message. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Seeds a demo team with sample teammates (Harsh, Rahul, Ananya, Kiran),
+ * realistic standup updates, and initial group chat messages.
  */
 export async function seedDemoTeamForUser(uid: string, todayDate: string) {
   try {
     const demoTeammates = [
       {
         id: 'demo-user-harsh',
-        email: 'harsh@standuplog.dev',
+        email: 'harsh@teamcollab.dev',
         fullName: 'Harsh',
         jobTitle: 'Backend Engineer',
       },
       {
         id: 'demo-user-rahul',
-        email: 'rahul@standuplog.dev',
-        fullName: 'Rahul Sharma',
+        email: 'rahul@teamcollab.dev',
+        fullName: 'Rahul',
         jobTitle: 'Full-Stack Developer',
       },
       {
-        id: 'demo-user-priya',
-        email: 'priya@standuplog.dev',
-        fullName: 'Priya Patel',
+        id: 'demo-user-ananya',
+        email: 'ananya@teamcollab.dev',
+        fullName: 'Ananya',
         jobTitle: 'Product Designer',
       },
       {
-        id: 'demo-user-maya',
-        email: 'maya@standuplog.dev',
-        fullName: 'Maya Lin',
+        id: 'demo-user-kiran',
+        email: 'kiran@teamcollab.dev',
+        fullName: 'Kiran',
         jobTitle: 'QA & Release Lead',
       },
     ];
@@ -585,9 +837,9 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
       .insert(teams)
       .values({
         id: teamId,
-        name: 'Core Product Engineering',
+        name: 'Core Product Team',
         description:
-          'Daily async standup board for the Core Platform & API engineering squad.',
+          'Shared workspace for daily async standups and realtime group chat.',
         inviteCode,
         ownerId: uid,
       })
@@ -614,71 +866,50 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
         .onConflictDoNothing();
     }
 
-    // Calculate yesterday's date string
     const todayObj = new Date(`${todayDate}T12:00:00Z`);
     const yesterdayObj = new Date(todayObj.getTime() - 86400000);
-    const twoDaysAgoObj = new Date(todayObj.getTime() - 2 * 86400000);
     const yesterdayDate = yesterdayObj.toISOString().slice(0, 10);
-    const twoDaysAgoDate = twoDaysAgoObj.toISOString().slice(0, 10);
 
     const sampleUpdates = [
       {
         userId: 'demo-user-harsh',
         updateDate: todayDate,
-        workedOn: 'Completed the PostgreSQL DBMS schema and configured Row Level Security policies for team isolation.',
-        nextPlan: 'Build the main team bulletin board view and hook up Realtime subscriptions.',
+        workedOn: 'Completed the DBMS schema.',
+        nextPlan: 'Build the dashboard.',
         blockers: 'None.',
         offsetMinutes: -45,
       },
       {
         userId: 'demo-user-rahul',
         updateDate: todayDate,
-        workedOn: 'Fixed authentication session persistence and added protected route guards.',
-        nextPlan: 'End-to-end testing of invite codes and team switching.',
-        blockers: 'Waiting for staging OAuth callback URL approval from DevOps.',
+        workedOn: 'Fixed authentication.',
+        nextPlan: 'Testing.',
+        blockers: 'Waiting for API access.',
         offsetMinutes: -20,
       },
       {
-        userId: 'demo-user-priya',
+        userId: 'demo-user-ananya',
         updateDate: todayDate,
-        workedOn: 'Finalized responsive card layout and blocker warning badges for mobile screens.',
-        nextPlan: 'Review history date filter interactions with engineering.',
+        workedOn: 'Finalized the responsive workspace layout and chat view.',
+        nextPlan: 'Prepare sprint demo slides.',
         blockers: 'None.',
-        offsetMinutes: -8,
+        offsetMinutes: -10,
       },
-      // Yesterday's updates
       {
         userId: 'demo-user-harsh',
         updateDate: yesterdayDate,
-        workedOn: 'Drafted initial ERD for profiles, teams, team_members, and standup_updates.',
-        nextPlan: 'Write SQL migrations and test unique constraints.',
+        workedOn: 'Drafted initial ERD for profiles, teams, standups, and chat.',
+        nextPlan: 'Write SQL migrations and RLS policies.',
         blockers: 'None.',
         offsetMinutes: -1440,
       },
       {
         userId: 'demo-user-rahul',
         updateDate: yesterdayDate,
-        workedOn: 'Set up Vite + React Router skeleton and Tailwind configuration.',
-        nextPlan: 'Implement login and signup flows.',
+        workedOn: 'Configured Vite and React Router workspace.',
+        nextPlan: 'Connect Supabase Auth session persistence.',
         blockers: 'None.',
         offsetMinutes: -1400,
-      },
-      {
-        userId: 'demo-user-maya',
-        updateDate: yesterdayDate,
-        workedOn: 'Prepared QA checklist for realtime INSERT, UPDATE, and DELETE events.',
-        nextPlan: 'Verify multi-tab sync latency.',
-        blockers: 'Staging environment seed script needed updating.',
-        offsetMinutes: -1360,
-      },
-      // 2 days ago updates
-      {
-        userId: 'demo-user-priya',
-        updateDate: twoDaysAgoDate,
-        workedOn: 'Conducted user interviews on async standup friction points.',
-        nextPlan: 'Create clean bulletin board wireframes.',
-        blockers: 'None.',
-        offsetMinutes: -2880,
       },
     ];
 
@@ -700,6 +931,37 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
         .onConflictDoNothing();
     }
 
+    // Seed sample group chat conversation
+    const sampleChats = [
+      {
+        userId: 'demo-user-rahul',
+        message: 'Hey, has everyone finished the presentation?',
+        offsetMinutes: -18,
+      },
+      {
+        userId: 'demo-user-harsh',
+        message: "Almost. I'm fixing the dashboard now.",
+        offsetMinutes: -16,
+      },
+      {
+        userId: 'demo-user-ananya',
+        message: "I'll finish the slides in 20 minutes.",
+        offsetMinutes: -14,
+      },
+    ];
+
+    for (const chat of sampleChats) {
+      const ts = new Date(Date.now() + chat.offsetMinutes * 60000);
+      await db.insert(chatMessages).values({
+        id: crypto.randomUUID(),
+        teamId,
+        userId: chat.userId,
+        message: chat.message,
+        createdAt: ts,
+        updatedAt: ts,
+      });
+    }
+
     return createdTeam;
   } catch (error) {
     console.error('Database query failed in seedDemoTeamForUser:', error);
@@ -708,8 +970,7 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
 }
 
 /**
- * Simulates a live teammate posting or updating their standup on the current team board
- * so users can test Realtime updates with one click.
+ * Simulates a live teammate posting or updating their standup on the current team board.
  */
 export async function simulateTeammateRealtimeUpdate(
   uid: string,
@@ -722,13 +983,13 @@ export async function simulateTeammateRealtimeUpdate(
       throw new Error('UNAUTHORIZED_TEAM_ACCESS');
     }
 
-    const mateId = 'demo-user-maya';
+    const mateId = 'demo-user-kiran';
     await db
       .insert(profiles)
       .values({
         id: mateId,
-        email: 'maya@standuplog.dev',
-        fullName: 'Maya Lin',
+        email: 'kiran@teamcollab.dev',
+        fullName: 'Kiran',
         jobTitle: 'QA & Release Lead',
         avatarUrl: '',
       })
@@ -746,14 +1007,14 @@ export async function simulateTeammateRealtimeUpdate(
 
     const samples = [
       {
-        workedOn: 'Verified realtime PostgreSQL event broadcasting across concurrent browser tabs.',
-        nextPlan: 'Run regression suite on the History date filter view.',
+        workedOn: 'Verified realtime PostgreSQL events for standups and group chat.',
+        nextPlan: 'Run regression tests on History date filters.',
         blockers: 'None.',
       },
       {
-        workedOn: 'Audited Row Level Security policies for standup_updates and team_members.',
-        nextPlan: 'Sign off on production release checklist.',
-        blockers: 'Blocked on final confirmation for mobile Safari viewport test.',
+        workedOn: 'Audited Row Level Security policies for chat_messages and standup_updates.',
+        nextPlan: 'Sign off on production deployment checklist.',
+        blockers: 'Waiting for staging environment credentials.',
       },
     ];
     const pick = samples[Math.floor(Math.random() * samples.length)];
