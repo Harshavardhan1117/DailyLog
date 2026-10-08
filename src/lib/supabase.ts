@@ -21,11 +21,11 @@ export const supabase =
 
 let activeSessionToken: string | null = null;
 const SESSION_TOKEN_KEY = 'tc_session_token';
-const LOCAL_DB_KEY = 'tc_vercel_database_v2';
+const LOCAL_DB_KEY = 'tc_vercel_database_v3';
 const BROADCAST_CHANNEL_NAME = 'tc_realtime_workspace_events';
 
 type RealtimeCallback = (payload: {
-  table?: 'standup_updates' | 'chat_messages';
+  table?: 'standup_updates' | 'chat_messages' | 'tasks';
   eventType: 'INSERT' | 'UPDATE' | 'DELETE';
   new: any;
   old: any;
@@ -33,6 +33,7 @@ type RealtimeCallback = (payload: {
 
 const localStandupListeners = new Map<string, Set<RealtimeCallback>>();
 const localChatListeners = new Map<string, Set<RealtimeCallback>>();
+const localTaskListeners = new Set<RealtimeCallback>();
 
 let broadcastChannel: BroadcastChannel | null = null;
 try {
@@ -40,10 +41,12 @@ try {
     broadcastChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
     broadcastChannel.onmessage = (event) => {
       const { teamId, table, payload } = event.data || {};
-      if (!teamId || !payload) return;
-      if (table === 'chat_messages') {
+      if (!payload) return;
+      if (table === 'tasks') {
+        localTaskListeners.forEach((cb) => cb(payload));
+      } else if (table === 'chat_messages' && teamId) {
         localChatListeners.get(teamId)?.forEach((cb) => cb(payload));
-      } else {
+      } else if (teamId) {
         localStandupListeners.get(teamId)?.forEach((cb) => cb(payload));
       }
     };
@@ -54,14 +57,16 @@ try {
 
 function emitLocalRealtime(
   teamId: string,
-  table: 'standup_updates' | 'chat_messages',
+  table: 'standup_updates' | 'chat_messages' | 'tasks',
   payload: {
     eventType: 'INSERT' | 'UPDATE' | 'DELETE';
     new: any;
     old: any;
   }
 ) {
-  if (table === 'chat_messages') {
+  if (table === 'tasks') {
+    localTaskListeners.forEach((cb) => cb(payload));
+  } else if (table === 'chat_messages') {
     localChatListeners.get(teamId)?.forEach((cb) => cb(payload));
   } else {
     localStandupListeners.get(teamId)?.forEach((cb) => cb(payload));
@@ -187,6 +192,19 @@ interface LocalStore {
     createdAt: string;
     updatedAt: string;
   }>;
+  tasks: Array<{
+    id: string;
+    teamId: string;
+    createdBy: string;
+    assignedTo: string | null;
+    title: string;
+    description: string;
+    status: 'todo' | 'in_progress' | 'completed';
+    priority: 'low' | 'medium' | 'high';
+    dueDate: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
 }
 
 function loadLocalStore(): LocalStore {
@@ -200,6 +218,7 @@ function loadLocalStore(): LocalStore {
         teamMembers: parsed.teamMembers || [],
         standupUpdates: parsed.standupUpdates || [],
         chatMessages: parsed.chatMessages || [],
+        tasks: parsed.tasks || [],
       };
     }
   } catch {
@@ -211,6 +230,7 @@ function loadLocalStore(): LocalStore {
     teamMembers: [],
     standupUpdates: [],
     chatMessages: [],
+    tasks: [],
   };
 }
 
@@ -259,6 +279,18 @@ function getCurrentLocalUid(): string {
   if (decoded) return decoded;
   if (auth.currentUser?.uid) return auth.currentUser.uid;
   throw new Error('Unauthorized: Please log in to continue.');
+}
+
+function enrichLocalTask(store: LocalStore, task: LocalStore['tasks'][number]) {
+  const team = store.teams[task.teamId];
+  const creator = store.profiles[task.createdBy];
+  const assignee = task.assignedTo ? store.profiles[task.assignedTo] || null : null;
+  return {
+    ...task,
+    teamName: team?.name || 'Team',
+    creator: creator || null,
+    assignee,
+  };
 }
 
 async function tryBackendJson(
@@ -712,7 +744,7 @@ function handleLocalVercelRequest(
       id: teamId,
       name: 'Core Product Team',
       description:
-        'Shared workspace for daily async standups and realtime group chat.',
+        'Shared workspace for daily async standups, realtime group chat, and team tasks.',
       inviteCode: generateShortInviteCode('CORE'),
       ownerId: uid,
       createdAt: new Date().toISOString(),
@@ -739,6 +771,9 @@ function handleLocalVercelRequest(
 
     const todayObj = new Date(`${todayDate}T12:00:00Z`);
     const yesterdayDate = new Date(todayObj.getTime() - 86400000)
+      .toISOString()
+      .slice(0, 10);
+    const dueSoonDate = new Date(todayObj.getTime() + 4 * 86400000)
       .toISOString()
       .slice(0, 10);
 
@@ -771,7 +806,7 @@ function handleLocalVercelRequest(
         userId: 'demo-user-harsh',
         updateDate: yesterdayDate,
         workedOn:
-          'Drafted initial ERD for profiles, teams, standups, and chat.',
+          'Drafted initial ERD for profiles, teams, standups, chat, and tasks.',
         nextPlan: 'Write SQL migrations and RLS policies.',
         blockers: 'None.',
         offsetMinutes: -1440,
@@ -820,6 +855,73 @@ function handleLocalVercelRequest(
         message: chat.message,
         createdAt: ts,
         updatedAt: ts,
+      });
+    }
+
+    const sampleTasks: Array<{
+      title: string;
+      description: string;
+      assignedTo: string;
+      status: 'todo' | 'in_progress' | 'completed';
+      priority: 'low' | 'medium' | 'high';
+      dueDate: string;
+    }> = [
+      {
+        title: 'Fix login bug',
+        description: 'Ensure persistent session restoration across browser tabs.',
+        assignedTo: 'demo-user-rahul',
+        status: 'todo',
+        priority: 'high',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Create homepage',
+        description: 'Design clean landing page with workspace overview.',
+        assignedTo: 'demo-user-ananya',
+        status: 'todo',
+        priority: 'medium',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Build dashboard',
+        description: 'Create the main team workspace UI with Standup and Chat tabs.',
+        assignedTo: 'demo-user-harsh',
+        status: 'in_progress',
+        priority: 'high',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Setup Supabase',
+        description: 'Configure Supabase Auth, PostgreSQL tables, and Realtime.',
+        assignedTo: uid,
+        status: 'completed',
+        priority: 'high',
+        dueDate: todayDate,
+      },
+      {
+        title: 'Create database schema',
+        description: 'Write SQL schema and Row Level Security policies for all 6 tables.',
+        assignedTo: 'demo-user-harsh',
+        status: 'completed',
+        priority: 'medium',
+        dueDate: todayDate,
+      },
+    ];
+
+    const nowTs = new Date().toISOString();
+    for (const t of sampleTasks) {
+      store.tasks.push({
+        id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        teamId,
+        createdBy: uid,
+        assignedTo: t.assignedTo,
+        title: t.title,
+        description: t.description,
+        status: t.status,
+        priority: t.priority,
+        dueDate: t.dueDate,
+        createdAt: nowTs,
+        updatedAt: nowTs,
       });
     }
 
@@ -980,13 +1082,13 @@ function handleLocalVercelRequest(
     const samples = [
       {
         workedOn:
-          'Verified realtime PostgreSQL events for standups and group chat.',
+          'Verified realtime PostgreSQL events for standups, chat, and tasks.',
         nextPlan: 'Run regression suite on the History date filter view.',
         blockers: 'None.',
       },
       {
         workedOn:
-          'Audited Row Level Security policies for chat_messages and standup_updates.',
+          'Audited Row Level Security policies for tasks, chat_messages, and standup_updates.',
         nextPlan: 'Sign off on production release checklist.',
         blockers: 'Waiting for staging environment credentials.',
       },
@@ -1154,6 +1256,140 @@ function handleLocalVercelRequest(
       eventType: 'DELETE',
       new: null,
       old: { id: target.id, teamId: target.teamId, userId: target.userId },
+    });
+    return { deletedId: target.id };
+  }
+
+  // 18. GET /api/tasks
+  if (path === '/api/tasks' && method === 'GET') {
+    const myMemberships = store.teamMembers.filter((m) => m.userId === uid);
+    const myTeamIds = new Set(myMemberships.map((m) => m.teamId));
+
+    const teamsWithMembers = myMemberships
+      .map((m) => {
+        const team = store.teams[m.teamId];
+        if (!team) return null;
+        const members = store.teamMembers
+          .filter((tm) => tm.teamId === team.id)
+          .map(
+            (tm) =>
+              store.profiles[tm.userId] || {
+                id: tm.userId,
+                email: 'member@teamcollab.dev',
+                fullName: 'Team Member',
+                jobTitle: '',
+                avatarUrl: '',
+              }
+          );
+        return {
+          ...team,
+          myRole: m.role,
+          members,
+        };
+      })
+      .filter(Boolean);
+
+    const tasksList = store.tasks
+      .filter((t) => myTeamIds.has(t.teamId))
+      .map((t) => enrichLocalTask(store, t))
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      );
+
+    return {
+      tasks: tasksList,
+      teams: teamsWithMembers,
+    };
+  }
+
+  // 19. POST /api/tasks
+  if (path === '/api/tasks' && method === 'POST') {
+    const teamId = body?.teamId;
+    const title = (body?.title || '').trim();
+    if (!title) throw new Error('Task Title is required.');
+    if (!teamId) throw new Error('Please select a team.');
+
+    const now = new Date().toISOString();
+    const created: LocalStore['tasks'][number] = {
+      id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      teamId,
+      createdBy: uid,
+      assignedTo: body?.assignedTo || null,
+      title,
+      description: (body?.description || '').trim(),
+      status: body?.status || 'todo',
+      priority: body?.priority || 'medium',
+      dueDate: (body?.dueDate || '').trim(),
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.tasks.push(created);
+    saveLocalStore(store);
+
+    const enriched = enrichLocalTask(store, created);
+    emitLocalRealtime(teamId, 'tasks', {
+      eventType: 'INSERT',
+      new: enriched,
+      old: null,
+    });
+    return { task: enriched };
+  }
+
+  // 20. PUT /api/tasks/:taskId & DELETE /api/tasks/:taskId
+  const taskItemMatch = path.match(/^\/api\/tasks\/([^/?]+)$/);
+  if (taskItemMatch && method === 'PUT') {
+    const taskId = taskItemMatch[1];
+    const idx = store.tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) throw new Error('Task not found.');
+    const existing = store.tasks[idx];
+
+    store.tasks[idx] = {
+      ...existing,
+      title:
+        typeof body?.title === 'string' ? body.title.trim() : existing.title,
+      description:
+        typeof body?.description === 'string'
+          ? body.description.trim()
+          : existing.description,
+      assignedTo:
+        body?.assignedTo !== undefined
+          ? body.assignedTo || null
+          : existing.assignedTo,
+      priority: body?.priority || existing.priority,
+      dueDate:
+        typeof body?.dueDate === 'string'
+          ? body.dueDate.trim()
+          : existing.dueDate,
+      status: body?.status || existing.status,
+      updatedAt: new Date().toISOString(),
+    };
+    saveLocalStore(store);
+
+    const enriched = enrichLocalTask(store, store.tasks[idx]);
+    emitLocalRealtime(enriched.teamId, 'tasks', {
+      eventType: 'UPDATE',
+      new: enriched,
+      old: null,
+    });
+    return { task: enriched };
+  }
+
+  if (taskItemMatch && method === 'DELETE') {
+    const taskId = taskItemMatch[1];
+    const idx = store.tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) throw new Error('Task not found.');
+    const target = store.tasks[idx];
+    const team = store.teams[target.teamId];
+    if (target.createdBy !== uid && team?.ownerId !== uid) {
+      throw new Error('Only the task creator or team owner can delete this task.');
+    }
+    store.tasks.splice(idx, 1);
+    saveLocalStore(store);
+    emitLocalRealtime(target.teamId, 'tasks', {
+      eventType: 'DELETE',
+      new: null,
+      old: { id: target.id, teamId: target.teamId },
     });
     return { deletedId: target.id };
   }
@@ -1345,6 +1581,95 @@ export function subscribeToTeamChat(
 
   return () => {
     localChatListeners.get(teamId)?.delete(onPayload);
+    eventSource?.close();
+  };
+}
+
+/**
+ * Subscribes to Realtime PostgreSQL changes on `tasks`.
+ * Handles INSERT, UPDATE, and DELETE events and returns a cleanup function.
+ */
+export function subscribeToTasks(
+  onPayload: RealtimeCallback,
+  onStatusChange?: (status: 'SUBSCRIBED' | 'ERROR') => void
+): () => void {
+  localTaskListeners.add(onPayload);
+
+  if (supabase) {
+    const channel = supabase
+      .channel('tasks:workspace')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tasks',
+        },
+        (payload) => {
+          onPayload({
+            table: 'tasks',
+            eventType: payload.eventType as 'INSERT' | 'UPDATE' | 'DELETE',
+            new: payload.new,
+            old: payload.old,
+          });
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') onStatusChange?.('SUBSCRIBED');
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          onStatusChange?.('SUBSCRIBED');
+        }
+      });
+
+    return () => {
+      localTaskListeners.delete(onPayload);
+      supabase.removeChannel(channel);
+    };
+  }
+
+  let eventSource: EventSource | null = null;
+  try {
+    eventSource = new EventSource('/api/tasks/realtime');
+
+    eventSource.onopen = () => {
+      onStatusChange?.('SUBSCRIBED');
+    };
+
+    eventSource.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data);
+        if (parsed.type === 'SUBSCRIBED') {
+          onStatusChange?.('SUBSCRIBED');
+          return;
+        }
+        if (parsed.table !== 'tasks') return;
+        if (
+          parsed.eventType === 'INSERT' ||
+          parsed.eventType === 'UPDATE' ||
+          parsed.eventType === 'DELETE'
+        ) {
+          onPayload({
+            table: 'tasks',
+            eventType: parsed.eventType,
+            new: parsed.new,
+            old: parsed.old,
+          });
+        }
+      } catch {
+        // Ignore non-JSON heartbeat
+      }
+    };
+
+    eventSource.onerror = () => {
+      eventSource?.close();
+      onStatusChange?.('SUBSCRIBED');
+    };
+  } catch {
+    onStatusChange?.('SUBSCRIBED');
+  }
+
+  return () => {
+    localTaskListeners.delete(onPayload);
     eventSource?.close();
   };
 }

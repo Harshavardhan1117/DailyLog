@@ -1,7 +1,7 @@
 -- =============================================================================
 -- TEAM COLLABORATION - SUPABASE SQL SCHEMA, RLS POLICIES & REALTIME SETUP
 -- =============================================================================
--- Run this script in your Supabase SQL Editor to configure the complete database.
+-- Run this script in your Supabase SQL Editor to configure all 6 tables.
 
 -- Enable UUID generation extension
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -77,7 +77,6 @@ CREATE TABLE IF NOT EXISTS public.standup_updates (
   blockers TEXT NOT NULL DEFAULT 'None.',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  -- Each member has one daily update per team and can edit it later
   UNIQUE (team_id, user_id, update_date)
 );
 
@@ -89,6 +88,23 @@ CREATE TABLE IF NOT EXISTS public.chat_messages (
   team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
   message TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- -----------------------------------------------------------------------------
+-- 6. TASKS TABLE
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.tasks (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  team_id UUID NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
+  created_by UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+  assigned_to UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo', 'in_progress', 'completed')),
+  priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
+  due_date TEXT NOT NULL DEFAULT '',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -112,8 +128,13 @@ CREATE TRIGGER trg_chat_messages_updated_at
   BEFORE UPDATE ON public.chat_messages
   FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+DROP TRIGGER IF EXISTS trg_tasks_updated_at ON public.tasks;
+CREATE TRIGGER trg_tasks_updated_at
+  BEFORE UPDATE ON public.tasks
+  FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
 -- =============================================================================
--- 6. ROW LEVEL SECURITY (RLS) POLICIES
+-- 7. ROW LEVEL SECURITY (RLS) POLICIES
 -- =============================================================================
 
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
@@ -121,6 +142,7 @@ ALTER TABLE public.teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.team_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.standup_updates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tasks ENABLE ROW LEVEL SECURITY;
 
 -- Helper function to check if the current user belongs to a team
 CREATE OR REPLACE FUNCTION public.is_team_member(check_team_id UUID)
@@ -249,12 +271,39 @@ CREATE POLICY "Delete their own messages"
   TO authenticated
   USING (user_id = auth.uid());
 
+-- Tasks Policies
+CREATE POLICY "Read tasks from teams they belong to"
+  ON public.tasks FOR SELECT
+  TO authenticated
+  USING (public.is_team_member(team_id));
+
+CREATE POLICY "Create tasks in teams they belong to"
+  ON public.tasks FOR INSERT
+  TO authenticated
+  WITH CHECK (
+    created_by = auth.uid() AND
+    public.is_team_member(team_id)
+  );
+
+CREATE POLICY "Update tasks in teams they belong to"
+  ON public.tasks FOR UPDATE
+  TO authenticated
+  USING (public.is_team_member(team_id))
+  WITH CHECK (public.is_team_member(team_id));
+
+CREATE POLICY "Delete tasks they created"
+  ON public.tasks FOR DELETE
+  TO authenticated
+  USING (created_by = auth.uid());
+
 -- =============================================================================
--- 7. SUPABASE REALTIME CONFIGURATION
+-- 8. SUPABASE REALTIME CONFIGURATION
 -- =============================================================================
--- Enable Realtime PostgreSQL CDC (INSERT, UPDATE, DELETE) for standup_updates and chat_messages
+-- Enable Realtime PostgreSQL CDC (INSERT, UPDATE, DELETE) for all 3 collaboration tables
 ALTER TABLE public.standup_updates REPLICA IDENTITY FULL;
 ALTER TABLE public.chat_messages REPLICA IDENTITY FULL;
+ALTER TABLE public.tasks REPLICA IDENTITY FULL;
 
 ALTER PUBLICATION supabase_realtime ADD TABLE public.standup_updates;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.chat_messages;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.tasks;

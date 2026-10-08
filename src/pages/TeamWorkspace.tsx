@@ -312,6 +312,12 @@ export function TeamWorkspace() {
               )}
             </button>
           )}
+          <Link
+            to={`/tasks?teamId=${teamId}`}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap"
+          >
+            Team Tasks →
+          </Link>
         </div>
       </div>
 
@@ -363,7 +369,7 @@ export function TeamWorkspace() {
           <button
             type="button"
             onClick={() => setActiveTab('members')}
-            className={`lg:hidden px-4 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+            className={`px-4 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
               activeTab === 'members'
                 ? 'bg-white text-slate-900 shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'

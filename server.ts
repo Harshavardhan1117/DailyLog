@@ -24,6 +24,10 @@ import {
   createChatMessage,
   updateChatMessage,
   deleteChatMessage,
+  getUserTasksAndTeams,
+  createTaskForTeam,
+  updateTaskForTeam,
+  deleteTaskForTeam,
   seedDemoTeamForUser,
   simulateTeammateRealtimeUpdate,
 } from './src/db/queries.ts';
@@ -119,32 +123,44 @@ app.post('/api/auth/quick-session', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Realtime SSE Subscribers mapped by teamId (for standup_updates & chat_messages)
+// Realtime SSE Subscribers (standup_updates, chat_messages, tasks)
 // ---------------------------------------------------------------------------
 const teamSubscribers = new Map<string, Set<Response>>();
+const globalTaskSubscribers = new Set<Response>();
 
 function broadcastRealtimeEvent(
   teamId: string,
   payload: {
-    table: 'standup_updates' | 'chat_messages';
+    table: 'standup_updates' | 'chat_messages' | 'tasks';
     eventType: 'INSERT' | 'UPDATE' | 'DELETE';
     new: any;
     old: any;
   }
 ) {
-  const clients = teamSubscribers.get(teamId);
-  if (!clients || clients.size === 0) return;
-
   const dataString = `data: ${JSON.stringify({
     schema: 'public',
+    teamId,
     ...payload,
   })}\n\n`;
 
-  for (const clientRes of clients) {
-    try {
-      clientRes.write(dataString);
-    } catch {
-      clients.delete(clientRes);
+  const clients = teamSubscribers.get(teamId);
+  if (clients) {
+    for (const clientRes of clients) {
+      try {
+        clientRes.write(dataString);
+      } catch {
+        clients.delete(clientRes);
+      }
+    }
+  }
+
+  if (payload.table === 'tasks') {
+    for (const clientRes of globalTaskSubscribers) {
+      try {
+        clientRes.write(dataString);
+      } catch {
+        globalTaskSubscribers.delete(clientRes);
+      }
     }
   }
 }
@@ -594,7 +610,118 @@ app.delete(
 );
 
 // ---------------------------------------------------------------------------
-// Realtime stream for a team workspace (standup_updates & chat_messages)
+// Task Management Routes (tasks)
+// ---------------------------------------------------------------------------
+
+app.get('/api/tasks', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    await getOrCreateProfile(
+      user.uid,
+      user.email || 'member@teamcollab.dev',
+      user.name,
+      user.picture
+    );
+    const data = await getUserTasksAndTeams(user.uid);
+    res.json(data);
+  } catch (error: any) {
+    console.error('Failed to load tasks:', error);
+    res.status(500).json({
+      error: 'Unable to load tasks. Please try again.',
+    });
+  }
+});
+
+app.post('/api/tasks', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const { teamId, title, description, assignedTo, priority, dueDate, status } =
+      req.body;
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return res.status(400).json({ error: 'Task Title is required.' });
+    }
+    if (!teamId || typeof teamId !== 'string') {
+      return res.status(400).json({ error: 'Please select a team.' });
+    }
+
+    const created = await createTaskForTeam(user.uid, {
+      teamId,
+      title,
+      description,
+      assignedTo,
+      priority,
+      dueDate,
+      status,
+    });
+
+    broadcastRealtimeEvent(teamId, {
+      table: 'tasks',
+      eventType: 'INSERT',
+      new: created,
+      old: null,
+    });
+
+    res.status(201).json({ task: created });
+  } catch (error: any) {
+    console.error('Failed to create task:', error);
+    res.status(500).json({
+      error: 'Unable to create task. Please try again.',
+    });
+  }
+});
+
+app.put('/api/tasks/:taskId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const { taskId } = req.params;
+    const updated = await updateTaskForTeam(user.uid, taskId, req.body);
+
+    broadcastRealtimeEvent(updated.teamId, {
+      table: 'tasks',
+      eventType: 'UPDATE',
+      new: updated,
+      old: null,
+    });
+
+    res.json({ task: updated });
+  } catch (error: any) {
+    console.error('Failed to update task:', error);
+    res.status(500).json({
+      error: 'Unable to update task. Please try again.',
+    });
+  }
+});
+
+app.delete('/api/tasks/:taskId', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const { taskId } = req.params;
+    const deleted = await deleteTaskForTeam(user.uid, taskId);
+
+    broadcastRealtimeEvent(deleted.teamId, {
+      table: 'tasks',
+      eventType: 'DELETE',
+      new: null,
+      old: { id: deleted.id, teamId: deleted.teamId },
+    });
+
+    res.json({ deletedId: deleted.id });
+  } catch (error: any) {
+    console.error('Failed to delete task:', error);
+    if (error.message === 'FORBIDDEN_NOT_CREATOR') {
+      return res.status(403).json({
+        error: 'Only the task creator or team owner can delete this task.',
+      });
+    }
+    res.status(500).json({
+      error: 'Unable to delete task. Please try again.',
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Realtime streams
 // ---------------------------------------------------------------------------
 app.get('/api/teams/:teamId/realtime', (req, res) => {
   const { teamId } = req.params;
@@ -622,6 +749,29 @@ app.get('/api/teams/:teamId/realtime', (req, res) => {
   req.on('close', () => {
     clearInterval(heartbeat);
     teamSubscribers.get(teamId)?.delete(res);
+  });
+});
+
+app.get('/api/tasks/realtime', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  res.write(`data: ${JSON.stringify({ type: 'SUBSCRIBED' })}\n\n`);
+  globalTaskSubscribers.add(res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    globalTaskSubscribers.delete(res);
   });
 });
 

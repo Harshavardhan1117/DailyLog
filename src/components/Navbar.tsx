@@ -8,9 +8,10 @@ interface NavbarProps {
 
 /**
  * Main navigation bar using the product name "Team Collaboration" everywhere.
- * Zone 1: Brand title ("Team Collaboration")
- * Zone 2: Navigation links (My Teams, Profile, SQL & RLS Guide)
- * Zone 3: User action (Logout or Sign In)
+ * Layout:
+ * ┌──────────────────────────────────────────────────────┐
+ * │ Team Collaboration    My Teams   Tasks   Profile     │
+ * └──────────────────────────────────────────────────────┘
  */
 export function Navbar({ onOpenSqlDocs }: NavbarProps) {
   const { user, profile, logout } = useAuth();
@@ -28,7 +29,7 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
   return (
     <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
-        {/* Zone 1: Single text element wordmark */}
+        {/* Zone 1: Brand title ("Team Collaboration") */}
         <Link
           to={user ? '/teams' : '/'}
           className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
@@ -36,7 +37,7 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
           Team Collaboration
         </Link>
 
-        {/* Zone 2: Clean text navigation links */}
+        {/* Zone 2: Main navigation links (My Teams | Tasks | Profile) */}
         <nav className="flex items-center gap-5 sm:gap-7 text-sm font-medium text-slate-600">
           {user ? (
             <>
@@ -49,6 +50,16 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
                 }`}
               >
                 My Teams
+              </Link>
+              <Link
+                to="/tasks"
+                className={`whitespace-nowrap transition-colors hover:text-slate-900 ${
+                  isActive('/tasks')
+                    ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-slate-900'
+                    : ''
+                }`}
+              >
+                Tasks
               </Link>
               <Link
                 to="/profile"
@@ -76,13 +87,13 @@ export function Navbar({ onOpenSqlDocs }: NavbarProps) {
           <button
             type="button"
             onClick={onOpenSqlDocs}
-            className="whitespace-nowrap text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
+            className="hidden md:inline-block whitespace-nowrap text-slate-600 hover:text-slate-900 transition-colors cursor-pointer"
           >
             SQL & RLS Guide
           </button>
         </nav>
 
-        {/* Zone 3: Primary actions */}
+        {/* Zone 3: User actions (Logout / Login) */}
         <div className="flex items-center gap-3 shrink-0">
           {user ? (
             <>

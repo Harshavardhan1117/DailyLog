@@ -5,8 +5,9 @@ import {
   teamMembers,
   standupUpdates,
   chatMessages,
+  tasks,
 } from './schema.ts';
-import { eq, and, desc, asc } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray } from 'drizzle-orm';
 import crypto from 'crypto';
 
 /**
@@ -338,9 +339,6 @@ export async function joinTeamByInviteCode(uid: string, inviteCode: string) {
   }
 }
 
-/**
- * Allows a user to leave a team. If the owner leaves and is the only member, deletes the team.
- */
 export async function leaveTeamForUser(uid: string, teamId: string) {
   try {
     await db
@@ -355,9 +353,6 @@ export async function leaveTeamForUser(uid: string, teamId: string) {
   }
 }
 
-/**
- * Allows a team owner to remove a member from the team.
- */
 export async function removeTeamMember(
   requesterUid: string,
   teamId: string,
@@ -404,9 +399,6 @@ export async function removeTeamMember(
   }
 }
 
-/**
- * Verifies user is a member of the team (RLS-equivalent backend check).
- */
 export async function verifyTeamMembership(uid: string, teamId: string) {
   try {
     const found = await db
@@ -421,9 +413,6 @@ export async function verifyTeamMembership(uid: string, teamId: string) {
   }
 }
 
-/**
- * Loads full team details, members with profiles, and standup updates.
- */
 export async function getTeamBoardData(
   uid: string,
   teamId: string,
@@ -500,10 +489,6 @@ export async function getTeamBoardData(
   }
 }
 
-/**
- * Upserts (creates or edits) a daily standup update for a user.
- * Enforces UNIQUE(team_id, user_id, update_date) and membership verification.
- */
 export async function upsertStandupUpdate(
   uid: string,
   teamId: string,
@@ -581,9 +566,6 @@ export async function upsertStandupUpdate(
   }
 }
 
-/**
- * Deletes a user's own standup update. Users cannot delete another user's update.
- */
 export async function deleteStandupUpdate(uid: string, updateId: string) {
   try {
     const found = await db
@@ -618,9 +600,6 @@ export async function deleteStandupUpdate(uid: string, updateId: string) {
 // Group Chat Database Queries (chat_messages)
 // ============================================================================
 
-/**
- * Fetches all chat messages for a team ordered oldest-to-newest so newest are at the bottom.
- */
 export async function getTeamChatMessages(uid: string, teamId: string) {
   try {
     const membership = await verifyTeamMembership(uid, teamId);
@@ -651,9 +630,6 @@ export async function getTeamChatMessages(uid: string, teamId: string) {
   }
 }
 
-/**
- * Inserts a new chat message in `chat_messages` for a team member.
- */
 export async function createChatMessage(
   uid: string,
   teamId: string,
@@ -696,9 +672,6 @@ export async function createChatMessage(
   }
 }
 
-/**
- * Updates a user's own chat message.
- */
 export async function updateChatMessage(
   uid: string,
   messageId: string,
@@ -750,9 +723,6 @@ export async function updateChatMessage(
   }
 }
 
-/**
- * Deletes a user's own chat message.
- */
 export async function deleteChatMessage(uid: string, messageId: string) {
   try {
     const found = await db
@@ -784,9 +754,261 @@ export async function deleteChatMessage(uid: string, messageId: string) {
   }
 }
 
+// ============================================================================
+// Task Management Database Queries (tasks)
+// ============================================================================
+
+/**
+ * Helper to enrich a raw task row with its team, creator, and assignee profile info.
+ */
+async function enrichTaskRecord(taskRow: any) {
+  const [team] = await db
+    .select()
+    .from(teams)
+    .where(eq(teams.id, taskRow.teamId));
+
+  const [creator] = await db
+    .select()
+    .from(profiles)
+    .where(eq(profiles.id, taskRow.createdBy));
+
+  let assignee = null;
+  if (taskRow.assignedTo) {
+    const [foundAssignee] = await db
+      .select()
+      .from(profiles)
+      .where(eq(profiles.id, taskRow.assignedTo));
+    assignee = sanitizeProfile(foundAssignee) || null;
+  }
+
+  return {
+    ...taskRow,
+    teamName: team?.name || 'Team',
+    creator: sanitizeProfile(creator),
+    assignee,
+  };
+}
+
+/**
+ * Loads all tasks across all teams the user belongs to, along with the user's teams and their members.
+ */
+export async function getUserTasksAndTeams(uid: string) {
+  try {
+    const myMemberships = await db
+      .select({
+        team: teams,
+        role: teamMembers.role,
+      })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+      .where(eq(teamMembers.userId, uid));
+
+    if (myMemberships.length === 0) {
+      return { tasks: [], teams: [] };
+    }
+
+    const teamIds = myMemberships.map((m) => m.team.id);
+
+    // Fetch members for each of the user's teams (for the "Assign To" dropdown)
+    const allTeamMembersRows = await db
+      .select({
+        teamId: teamMembers.teamId,
+        role: teamMembers.role,
+        user: profiles,
+      })
+      .from(teamMembers)
+      .innerJoin(profiles, eq(teamMembers.userId, profiles.id))
+      .where(inArray(teamMembers.teamId, teamIds));
+
+    const teamsWithMembers = myMemberships.map(({ team, role }) => ({
+      ...team,
+      myRole: role,
+      members: allTeamMembersRows
+        .filter((r) => r.teamId === team.id)
+        .map((r) => sanitizeProfile(r.user)),
+    }));
+
+    // Fetch all tasks belonging to those teams
+    const taskRows = await db
+      .select()
+      .from(tasks)
+      .where(inArray(tasks.teamId, teamIds))
+      .orderBy(desc(tasks.updatedAt));
+
+    const enrichedTasks = await Promise.all(
+      taskRows.map((row) => enrichTaskRecord(row))
+    );
+
+    return {
+      tasks: enrichedTasks,
+      teams: teamsWithMembers,
+    };
+  } catch (error) {
+    console.error('Database query failed in getUserTasksAndTeams:', error);
+    throw new Error('Unable to load tasks. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Creates a new task in a team the user belongs to.
+ */
+export async function createTaskForTeam(
+  uid: string,
+  data: {
+    teamId: string;
+    title: string;
+    description?: string;
+    assignedTo?: string | null;
+    priority?: string;
+    dueDate?: string;
+    status?: string;
+  }
+) {
+  try {
+    const membership = await verifyTeamMembership(uid, data.teamId);
+    if (!membership) {
+      throw new Error('UNAUTHORIZED_TEAM_ACCESS');
+    }
+
+    const now = new Date();
+    const [created] = await db
+      .insert(tasks)
+      .values({
+        id: crypto.randomUUID(),
+        teamId: data.teamId,
+        createdBy: uid,
+        assignedTo: data.assignedTo || null,
+        title: data.title.trim(),
+        description: (data.description || '').trim(),
+        status: data.status || 'todo',
+        priority: data.priority || 'medium',
+        dueDate: (data.dueDate || '').trim(),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    return await enrichTaskRecord(created);
+  } catch (error: any) {
+    console.error('Database query failed in createTaskForTeam:', error);
+    if (error.message === 'UNAUTHORIZED_TEAM_ACCESS') throw error;
+    throw new Error('Unable to create task. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Updates an existing task (title, description, assignedTo, priority, dueDate, or status).
+ * Any member of the task's team can update the task or change its status.
+ */
+export async function updateTaskForTeam(
+  uid: string,
+  taskId: string,
+  updates: {
+    title?: string;
+    description?: string;
+    assignedTo?: string | null;
+    priority?: string;
+    dueDate?: string;
+    status?: string;
+  }
+) {
+  try {
+    const found = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    if (found.length === 0) {
+      throw new Error('TASK_NOT_FOUND');
+    }
+
+    const existing = found[0];
+    const membership = await verifyTeamMembership(uid, existing.teamId);
+    if (!membership) {
+      throw new Error('UNAUTHORIZED_TEAM_ACCESS');
+    }
+
+    const [updated] = await db
+      .update(tasks)
+      .set({
+        title:
+          typeof updates.title === 'string'
+            ? updates.title.trim()
+            : existing.title,
+        description:
+          typeof updates.description === 'string'
+            ? updates.description.trim()
+            : existing.description,
+        assignedTo:
+          updates.assignedTo !== undefined
+            ? updates.assignedTo || null
+            : existing.assignedTo,
+        priority: updates.priority || existing.priority,
+        dueDate:
+          typeof updates.dueDate === 'string'
+            ? updates.dueDate.trim()
+            : existing.dueDate,
+        status: updates.status || existing.status,
+        updatedAt: new Date(),
+      })
+      .where(eq(tasks.id, taskId))
+      .returning();
+
+    return await enrichTaskRecord(updated);
+  } catch (error: any) {
+    console.error('Database query failed in updateTaskForTeam:', error);
+    if (
+      error.message === 'TASK_NOT_FOUND' ||
+      error.message === 'UNAUTHORIZED_TEAM_ACCESS'
+    ) {
+      throw error;
+    }
+    throw new Error('Unable to update task. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Deletes a task. Allows the task creator or team owner to delete the task.
+ */
+export async function deleteTaskForTeam(uid: string, taskId: string) {
+  try {
+    const found = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    if (found.length === 0) {
+      throw new Error('TASK_NOT_FOUND');
+    }
+
+    const existing = found[0];
+    const membership = await verifyTeamMembership(uid, existing.teamId);
+    if (!membership) {
+      throw new Error('UNAUTHORIZED_TEAM_ACCESS');
+    }
+
+    if (existing.createdBy !== uid && membership.role !== 'owner') {
+      throw new Error('FORBIDDEN_NOT_CREATOR');
+    }
+
+    await db.delete(tasks).where(eq(tasks.id, taskId));
+    return existing;
+  } catch (error: any) {
+    console.error('Database query failed in deleteTaskForTeam:', error);
+    if (
+      error.message === 'TASK_NOT_FOUND' ||
+      error.message === 'UNAUTHORIZED_TEAM_ACCESS' ||
+      error.message === 'FORBIDDEN_NOT_CREATOR'
+    ) {
+      throw error;
+    }
+    throw new Error('Unable to delete task. Please try again.', {
+      cause: error,
+    });
+  }
+}
+
 /**
  * Seeds a demo team with sample teammates (Harsh, Rahul, Ananya, Kiran),
- * realistic standup updates, and initial group chat messages.
+ * realistic standup updates, group chat messages, and Kanban tasks.
  */
 export async function seedDemoTeamForUser(uid: string, todayDate: string) {
   try {
@@ -839,7 +1061,7 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
         id: teamId,
         name: 'Core Product Team',
         description:
-          'Shared workspace for daily async standups and realtime group chat.',
+          'Shared workspace for daily async standups, realtime group chat, and team tasks.',
         inviteCode,
         ownerId: uid,
       })
@@ -869,6 +1091,9 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
     const todayObj = new Date(`${todayDate}T12:00:00Z`);
     const yesterdayObj = new Date(todayObj.getTime() - 86400000);
     const yesterdayDate = yesterdayObj.toISOString().slice(0, 10);
+    const dueSoonDate = new Date(todayObj.getTime() + 4 * 86400000)
+      .toISOString()
+      .slice(0, 10);
 
     const sampleUpdates = [
       {
@@ -898,18 +1123,11 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
       {
         userId: 'demo-user-harsh',
         updateDate: yesterdayDate,
-        workedOn: 'Drafted initial ERD for profiles, teams, standups, and chat.',
+        workedOn:
+          'Drafted initial ERD for profiles, teams, standups, chat, and tasks.',
         nextPlan: 'Write SQL migrations and RLS policies.',
         blockers: 'None.',
         offsetMinutes: -1440,
-      },
-      {
-        userId: 'demo-user-rahul',
-        updateDate: yesterdayDate,
-        workedOn: 'Configured Vite and React Router workspace.',
-        nextPlan: 'Connect Supabase Auth session persistence.',
-        blockers: 'None.',
-        offsetMinutes: -1400,
       },
     ];
 
@@ -931,7 +1149,6 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
         .onConflictDoNothing();
     }
 
-    // Seed sample group chat conversation
     const sampleChats = [
       {
         userId: 'demo-user-rahul',
@@ -962,6 +1179,64 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
       });
     }
 
+    // Seed sample Kanban tasks across To Do, In Progress, and Completed
+    const sampleTasks = [
+      {
+        title: 'Fix login bug',
+        description: 'Ensure persistent session restoration across browser tabs.',
+        assignedTo: 'demo-user-rahul',
+        status: 'todo',
+        priority: 'high',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Create homepage',
+        description: 'Design clean landing page with workspace overview.',
+        assignedTo: 'demo-user-ananya',
+        status: 'todo',
+        priority: 'medium',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Build dashboard',
+        description: 'Create the main team workspace UI with Standup and Chat tabs.',
+        assignedTo: 'demo-user-harsh',
+        status: 'in_progress',
+        priority: 'high',
+        dueDate: dueSoonDate,
+      },
+      {
+        title: 'Setup Supabase',
+        description: 'Configure Supabase Auth, PostgreSQL tables, and Realtime.',
+        assignedTo: uid,
+        status: 'completed',
+        priority: 'high',
+        dueDate: todayDate,
+      },
+      {
+        title: 'Create database schema',
+        description: 'Write SQL schema and Row Level Security policies for all 6 tables.',
+        assignedTo: 'demo-user-harsh',
+        status: 'completed',
+        priority: 'medium',
+        dueDate: todayDate,
+      },
+    ];
+
+    for (const t of sampleTasks) {
+      await db.insert(tasks).values({
+        id: crypto.randomUUID(),
+        teamId,
+        createdBy: uid,
+        assignedTo: t.assignedTo,
+        title: t.title,
+        description: t.description,
+        status: t.status,
+        priority: t.priority,
+        dueDate: t.dueDate,
+      });
+    }
+
     return createdTeam;
   } catch (error) {
     console.error('Database query failed in seedDemoTeamForUser:', error);
@@ -969,9 +1244,6 @@ export async function seedDemoTeamForUser(uid: string, todayDate: string) {
   }
 }
 
-/**
- * Simulates a live teammate posting or updating their standup on the current team board.
- */
 export async function simulateTeammateRealtimeUpdate(
   uid: string,
   teamId: string,
@@ -1007,12 +1279,14 @@ export async function simulateTeammateRealtimeUpdate(
 
     const samples = [
       {
-        workedOn: 'Verified realtime PostgreSQL events for standups and group chat.',
+        workedOn:
+          'Verified realtime PostgreSQL events for standups, chat, and tasks.',
         nextPlan: 'Run regression tests on History date filters.',
         blockers: 'None.',
       },
       {
-        workedOn: 'Audited Row Level Security policies for chat_messages and standup_updates.',
+        workedOn:
+          'Audited Row Level Security policies for tasks, chat_messages, and standup_updates.',
         nextPlan: 'Sign off on production deployment checklist.',
         blockers: 'Waiting for staging environment credentials.',
       },

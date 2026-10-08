@@ -97,6 +97,29 @@ export const chatMessages = pgTable('chat_messages', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+/**
+ * Tasks table for team task management across To Do, In Progress, and Completed.
+ */
+export const tasks = pgTable('tasks', {
+  id: text('id').primaryKey(),
+  teamId: text('team_id')
+    .references(() => teams.id, { onDelete: 'cascade' })
+    .notNull(),
+  createdBy: text('created_by')
+    .references(() => profiles.id, { onDelete: 'cascade' })
+    .notNull(),
+  assignedTo: text('assigned_to').references(() => profiles.id, {
+    onDelete: 'set null',
+  }),
+  title: text('title').notNull(),
+  description: text('description').default('').notNull(),
+  status: text('status').default('todo').notNull(), // 'todo' | 'in_progress' | 'completed'
+  priority: text('priority').default('medium').notNull(), // 'low' | 'medium' | 'high'
+  dueDate: text('due_date').default('').notNull(), // Optional YYYY-MM-DD
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 // Relations
 export const profilesRelations = relations(profiles, ({ many }) => ({
   ownedTeams: many(teams),
@@ -113,6 +136,7 @@ export const teamsRelations = relations(teams, ({ one, many }) => ({
   members: many(teamMembers),
   updates: many(standupUpdates),
   messages: many(chatMessages),
+  tasks: many(tasks),
 }));
 
 export const teamMembersRelations = relations(teamMembers, ({ one }) => ({
@@ -144,6 +168,21 @@ export const chatMessagesRelations = relations(chatMessages, ({ one }) => ({
   }),
   author: one(profiles, {
     fields: [chatMessages.userId],
+    references: [profiles.id],
+  }),
+}));
+
+export const tasksRelations = relations(tasks, ({ one }) => ({
+  team: one(teams, {
+    fields: [tasks.teamId],
+    references: [teams.id],
+  }),
+  creator: one(profiles, {
+    fields: [tasks.createdBy],
+    references: [profiles.id],
+  }),
+  assignee: one(profiles, {
+    fields: [tasks.assignedTo],
     references: [profiles.id],
   }),
 }));

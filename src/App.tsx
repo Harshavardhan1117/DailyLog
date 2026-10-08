@@ -12,6 +12,7 @@ import { SqlSetupModal } from './components/SqlSetupModal.tsx';
 import { Landing } from './pages/Landing.tsx';
 import { Login } from './pages/Login.tsx';
 import { Teams } from './pages/Teams.tsx';
+import { Tasks } from './pages/Tasks.tsx';
 import { TeamWorkspace } from './pages/TeamWorkspace.tsx';
 import { History } from './pages/History.tsx';
 import { Profile } from './pages/Profile.tsx';
@@ -34,6 +35,14 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <Teams />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/tasks"
+                element={
+                  <ProtectedRoute>
+                    <Tasks />
                   </ProtectedRoute>
                 }
               />
@@ -75,13 +84,16 @@ export default function App() {
 
           <footer className="border-t border-slate-200 bg-white py-5">
             <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-              <span>Team Collaboration · Standups & Realtime Team Chat</span>
+              <span>
+                Team Collaboration · Daily Standups, Realtime Group Chat &amp;
+                Task Management
+              </span>
               <button
                 type="button"
                 onClick={() => setSqlModalOpen(true)}
                 className="text-slate-600 hover:text-slate-900 underline underline-offset-4 cursor-pointer"
               >
-                View Supabase SQL Schema, RLS Policies & Setup Instructions
+                View Supabase SQL Schema, RLS Policies &amp; Setup Instructions
               </button>
             </div>
           </footer>
